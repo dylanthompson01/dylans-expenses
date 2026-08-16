@@ -1,0 +1,15 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+*.code-workspace
+
+# Netlify
+.netlify/
+
+# Logs / temp
+*.log
+*.tmp
