@@ -3,7 +3,7 @@
 A single-file expense tracker for a UCF student, built around 529 plan eligibility.
 Snap a receipt, let AI read it, and it lands in Google Sheets with the image in Drive.
 
-**Live:** https://<username>.github.io/dylans-expenses/
+**Live:** https://dylanthompson01.github.io/dylans-expenses/
 
 ## What it does
 
