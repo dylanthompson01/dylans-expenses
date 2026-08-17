@@ -121,8 +121,6 @@ body.scrolled .topbar{box-shadow:var(--sh-4);background:rgba(254,252,248,0.95);b
 /* DROP ZONE */
 #fileInput{display:none;}
 
-
-
 /* QUEUE */
 .queue{margin-top:16px;display:flex;flex-direction:column;gap:14px;}
 .q-item:has(.q-status.done){border-color:rgba(58,102,68,0.10);}
@@ -361,7 +359,6 @@ body.scrolled .topbar{box-shadow:var(--sh-4);background:rgba(254,252,248,0.95);b
 .pill:active{transform:scale(0.95);}
 .pill.p-green{border-color:var(--green);background:var(--green-dim);color:var(--green);box-shadow:0 2px 10px rgba(58,102,68,0.16);}
 
-
 /* ── Stat sub-boxes (spending habits, year breakdown) ── */
 .stat-box{background:linear-gradient(165deg,var(--surface2),#EFE4D2);border:1px solid rgba(105,82,54,0.07);border-radius:13px;padding:13px 12px;text-align:center;box-shadow:var(--sh-inset);transition:transform var(--dur-2) var(--ease),box-shadow var(--dur-2) var(--ease);}
 .stat-box:hover{transform:translateY(-2px);box-shadow:var(--sh-2),var(--sh-inset);}
@@ -465,7 +462,6 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 .reveal.in{opacity:1;transform:none;
   transition:opacity var(--dur-3) var(--ease),transform var(--dur-3) var(--ease);
   transition-delay:calc(var(--i,0) * 45ms);}
-
 
 /* ── Queue status chips ── */
 .q-status{transition:background var(--dur-2) var(--ease),color var(--dur-2) var(--ease);}
@@ -853,7 +849,6 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 
 </div>
 
-
 <!-- CARDS -->
 <div class="page" id="tab-list">
   <div class="filter-scroll">
@@ -925,8 +920,9 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 
 <script>
 // ─── CONFIG ───
-const GEMINI_MODEL = 'gemini-2.5-flash-lite';
-const GEMINI_KEY   = 'AIzaSyB6IuaazH9pEoOkKmJU70IV3TP17KhRoj4';
+// No API key here by design. Receipt scanning is proxied through Apps Script,
+// which holds the Gemini key in Script Properties. Anything in this file is
+// readable by anyone who opens the page, so no secret can ever live here.
 
 const CAT_ICONS={'Food & Dining':'bi-egg-fried','Tuition & Fees':'bi-bank2','Books & Supplies':'bi-book','Housing':'bi-house-fill','Transportation':'bi-car-front','Technology':'bi-laptop','Healthcare':'bi-heart-pulse','Entertainment':'bi-music-note-beamed','Clothing':'bi-shirt','Personal Care':'bi-stars','School Supplies':'bi-pencil-fill','Other':'bi-three-dots'};
 const CAT_COLORS=['#525B02','#4D8A84','#C47A38','#8A8E38','#3A6644','#695236','#B8725A','#7A9A92','#C4A882','#9E785E','#608880','#8A6848'];
@@ -938,7 +934,7 @@ let catChartInst, pieChartInst, timeChartInst;
 let processingQueue=[], isProcessing=false;
 
 // ─── SCRIPT URL ───
-function getScriptUrl(){ return 'https://script.google.com/macros/s/AKfycbzUF237R-gYPgWJimSu4BYK-fy-RPMiEM_1heV_IlYYxwk9TrnzWLuvrqy2OFFoh8ndBg/exec'; }
+function getScriptUrl(){ return 'https://script.google.com/macros/s/AKfycbzIESmXwsy9haJE2kjkFTutfAQQ5_iDPO9BLg0mFysp0obwJy4_AkRT-zP24mg3W5uCew/exec'; }
 function saveScriptUrl(){}
 function checkSetup(){ updateSyncStatus(); }
 function updateSyncStatus(){
@@ -1159,62 +1155,26 @@ function compressToBase64(file,maxPx,quality){
   });
 }
 
-// ─── GEMINI ───
-const GEMINI_MODEL_FALLBACK = 'gemini-2.0-flash-lite'; // fallback when primary overloaded
+// ─── RECEIPT SCANNING (via the Apps Script proxy) ───
+// The browser posts an image and receives parsed JSON. Model choice, the
+// prompt, retries and the API key all live server-side in Code.gs.
+async function readReceiptWithGemini(b64){
+  const body = new URLSearchParams();
+  body.append('payload', JSON.stringify({ action: 'scan', imageBase64: b64 }));
 
-async function readReceiptWithGemini(b64, attempt=1){
-  // After 3 attempts on primary, try the fallback model
-  const model = attempt <= 3 ? GEMINI_MODEL : GEMINI_MODEL_FALLBACK;
-  const prompt=`You are an expense parser for a college student's 529 expense tracker. The image is EITHER a photo of a purchase receipt OR a screenshot of a bank/credit-card statement. Return ONLY a raw JSON object — no markdown, no backticks, no extra text:
-{"receiptType":"Receipt","place":"store or vendor name","amount":12.34,"date":"YYYY-MM-DD","category":"Food & Dining","is529":"Yes","notes":"brief note max 60 chars"}
+  const resp = await fetch(getScriptUrl(), { method: 'POST', body, redirect: 'follow' });
+  if (!resp.ok) throw new Error('Scanner unreachable (HTTP ' + resp.status + ')');
 
-STEP 1 — Identify the document, set "receiptType" to exactly one of:
-- "Receipt" — an itemised store receipt, invoice, or order confirmation. Has line items, subtotal/tax/total, a store header.
-- "Bank Statement" — a screenshot of a banking or card app / statement. Shows a list of transactions with dates and amounts, a running balance, or a bank's interface.
+  const text = await resp.text();
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('Scanner returned no JSON — redeploy Apps Script?');
 
-STEP 2 — Extract the purchase.
-- For a Receipt: use the vendor name from the header and the FINAL total (after tax and discounts). Never use the subtotal.
-- For a Bank Statement: if one transaction is highlighted, circled, or clearly the subject, use it. Otherwise use the single largest non-payment, non-transfer purchase. Ignore rows that are payments, transfers, deposits, refunds, interest, or fees. Clean the merchant name — "SQ *JOES COFFEE 04412" becomes "Joe's Coffee", "AMZN Mktp US*2B4XY" becomes "Amazon".
+  let out;
+  try { out = JSON.parse(match[0]); }
+  catch { throw new Error('Scanner returned malformed JSON'); }
 
-STEP 3 — Categorise. Pick the single most specific match:
-Food & Dining, Tuition & Fees, Books & Supplies, Housing, Transportation, Technology, Healthcare, Entertainment, Clothing, Personal Care, School Supplies, Other.
-- Groceries AND restaurants both go under "Food & Dining" — the app splits them later using the vendor name, so the vendor name must be accurate.
-- Rent, utilities, electricity, water, internet-for-housing go under "Housing".
-- Laptops, software, phone/internet service go under "Technology".
-- Gas, Uber, parking, flights, car repair go under "Transportation".
-
-STEP 4 — Set "is529" using IRS Qualified Higher Education Expense rules:
-- "Yes": tuition and mandatory fees; required books, supplies and equipment; technology (computer, internet, required software); room and board (rent, utilities, groceries, meal plans); special-needs equipment; DOL-registered apprenticeship costs; student loan repayments; professional certification and licensing costs.
-- "No": restaurants and eating out; transportation, travel and parking; health insurance and medical fees; clothing; personal care; sports, club or activity fees not required for coursework.
-- "Not Sure": genuinely ambiguous only.
-
-Notes field: what was actually bought, max 60 chars. If the date is unreadable use today. If the amount is unreadable use 0.`;
-  const body={contents:[{parts:[{inline_data:{mime_type:'image/jpeg',data:b64}},{text:prompt}]}],generationConfig:{temperature:0.1,maxOutputTokens:300}};
-  const resp=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if(!resp.ok){
-    const err=await resp.json().catch(()=>({}));
-    const msg=(err.error?.message||'').toLowerCase();
-    // Only retry on genuine capacity/rate errors (not auth or bad request errors)
-    const isCapacity = resp.status===429 || resp.status===503
-      || msg.includes('overload') || msg.includes('high demand')
-      || msg.includes('quota') || msg.includes('rate') || msg.includes('resource_exhausted');
-    if(isCapacity && attempt<=5){
-      const waitSec = attempt <= 3 ? attempt * 3 : 10; // 3s, 6s, 9s then 10s
-      const usingFallback = attempt >= 3;
-      document.querySelectorAll('.q-status.reading').forEach(el=>{
-        el.innerHTML=`<i class="bi bi-clock"></i> ${usingFallback?'Trying backup model…':'Busy — retrying in '+waitSec+'s ('+attempt+'/5)'}`;
-      });
-      await sleep(waitSec*1000);
-      return readReceiptWithGemini(b64, attempt+1);
-    }
-    throw new Error(err.error?.message || 'API error '+resp.status);
-  }
-  const data=await resp.json();
-  const parts=data.candidates?.[0]?.content?.parts||[];
-  const text=parts.filter(p=>!p.thought).map(p=>p.text||'').join('');
-  const match=text.match(/\{[\s\S]*?\}/);
-  if(!match) throw new Error('No JSON in: '+text.slice(0,80));
-  return JSON.parse(match[0]);
+  if (!out.success) throw new Error(out.error || 'Scan failed');
+  return out.data;
 }
 
 // ─── 529 AUTO-DETERMINATION ───
@@ -1677,8 +1637,6 @@ function toast(msg,err=false){
   setTimeout(()=>{ t.classList.add('out'); setTimeout(()=>t.remove(),300); },2800);
 }
 
-
-
 // ─── YEARLY MONTHLY CHART (Dashboard) ───
 // ─── SINGLE-YEAR MONTHLY CHART ───
 const YEAR_COLORS = ['#3A6644','#C47A38','#4D8A84','#525B02','#8A8E38','#695236'];
@@ -1828,8 +1786,6 @@ function updateYearStats(byMonthYear) {
 
   statsEl.style.display = 'block';
 }
-
-
 
 // ─── GROCERY CLASSIFICATION ───
 // Splits Food & Dining into groceries (529-eligible as room & board) vs

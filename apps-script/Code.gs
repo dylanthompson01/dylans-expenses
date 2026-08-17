@@ -121,11 +121,115 @@ function doGet(e) {
   }
 }
 
+/* ===================================================================
+   GEMINI PROXY
+
+   The API key lives in Script Properties, never in the page. A key shipped
+   to the browser is public by definition — Google's scanner disabled the
+   previous one within hours of the repo going public. Here the browser
+   sends an image and gets back parsed JSON; it never sees the key.
+
+   ONE-TIME SETUP:
+     Apps Script > Project Settings (gear) > Script Properties >
+     Add script property:  GEMINI_KEY  =  <your new key>
+   =================================================================== */
+
+var GEMINI_PRIMARY  = 'gemini-2.5-flash-lite';
+var GEMINI_FALLBACK = 'gemini-2.0-flash-lite';
+
+var SCAN_PROMPT =
+'You are an expense parser for a college student\'s 529 expense tracker. The image is EITHER a photo of a purchase receipt OR a screenshot of a bank/credit-card statement. Return ONLY a raw JSON object - no markdown, no backticks, no extra text:\n' +
+'{"receiptType":"Receipt","place":"store or vendor name","amount":12.34,"date":"YYYY-MM-DD","category":"Food & Dining","is529":"Yes","notes":"brief note max 60 chars"}\n\n' +
+'STEP 1 - Identify the document, set "receiptType" to exactly one of:\n' +
+'- "Receipt" - an itemised store receipt, invoice, or order confirmation. Has line items, subtotal/tax/total, a store header.\n' +
+'- "Bank Statement" - a screenshot of a banking or card app / statement. Shows a list of transactions with dates and amounts, a running balance, or a bank interface.\n\n' +
+'STEP 2 - Extract the purchase.\n' +
+'- Receipt: use the vendor name from the header and the FINAL total (after tax and discounts). Never the subtotal.\n' +
+'- Bank Statement: if one transaction is highlighted or clearly the subject, use it. Otherwise use the single largest non-payment, non-transfer purchase. Ignore payments, transfers, deposits, refunds, interest and fees. Clean the merchant name - "SQ *JOES COFFEE 04412" becomes "Joe\'s Coffee", "AMZN Mktp US*2B4XY" becomes "Amazon".\n\n' +
+'STEP 3 - Categorise. Pick the single most specific match:\n' +
+'Food & Dining, Tuition & Fees, Books & Supplies, Housing, Transportation, Technology, Healthcare, Entertainment, Clothing, Personal Care, School Supplies, Other.\n' +
+'- Groceries AND restaurants both go under "Food & Dining" - the app splits them later using the vendor name, so the vendor name must be accurate.\n' +
+'- Rent, utilities, electricity, water go under "Housing".\n' +
+'- Laptops, software, phone/internet service go under "Technology".\n' +
+'- Gas, Uber, parking, flights, car repair go under "Transportation".\n\n' +
+'STEP 4 - Set "is529" using IRS Qualified Higher Education Expense rules:\n' +
+'- "Yes": tuition and mandatory fees; required books, supplies and equipment; technology; room and board (rent, utilities, groceries, meal plans); special-needs equipment; registered apprenticeship costs; student loan repayments; professional certification and licensing costs.\n' +
+'- "No": restaurants and eating out; transportation, travel and parking; health insurance and medical fees; clothing; personal care; sports or club fees not required for coursework.\n' +
+'- "Not Sure": genuinely ambiguous only.\n\n' +
+'Notes: what was actually bought, max 60 chars. Unreadable date - use today. Unreadable amount - use 0.';
+
+function geminiKey() {
+  var k = PropertiesService.getScriptProperties().getProperty('GEMINI_KEY');
+  if (!k) throw new Error('GEMINI_KEY is not set. Project Settings > Script Properties > add GEMINI_KEY.');
+  return k;
+}
+
+/** Confirms the key is present and working, without printing it. */
+function testGeminiKey() {
+  var k = geminiKey();
+  var resp = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(k),
+    { muteHttpExceptions: true });
+  var out = { code: resp.getResponseCode(), keyLength: k.length,
+              ok: resp.getResponseCode() === 200 };
+  if (!out.ok) out.body = resp.getContentText().slice(0, 300);
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+function callGemini(model, b64) {
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model +
+            ':generateContent?key=' + encodeURIComponent(geminiKey());
+  var body = {
+    contents: [{ parts: [ { inline_data: { mime_type: 'image/jpeg', data: b64 } },
+                          { text: SCAN_PROMPT } ] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 400 }
+  };
+  var resp = UrlFetchApp.fetch(url, {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify(body), muteHttpExceptions: true
+  });
+  var code = resp.getResponseCode(), text = resp.getContentText();
+
+  if (code !== 200) {
+    var retryable = code === 429 || code === 503 ||
+      /overload|high demand|quota|rate|resource_exhausted/i.test(text);
+    return { ok: false, retryable: retryable, error: 'HTTP ' + code + ' ' + text.slice(0, 180) };
+  }
+  var data = JSON.parse(text);
+  var parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+  var out = '';
+  for (var i = 0; i < parts.length; i++) {
+    if (!parts[i].thought && parts[i].text) out += parts[i].text;
+  }
+  var m = out.match(/\{[\s\S]*?\}/);
+  if (!m) return { ok: false, retryable: false, error: 'No JSON in model output: ' + out.slice(0, 140) };
+  try { return { ok: true, data: JSON.parse(m[0]) }; }
+  catch (parseErr) { return { ok: false, retryable: false, error: 'Bad JSON: ' + m[0].slice(0, 140) }; }
+}
+
+/** Primary model with retries, then the fallback model. */
+function scanReceipt(b64) {
+  if (!b64) return { success: false, error: 'No image supplied' };
+  var models = [GEMINI_PRIMARY, GEMINI_FALLBACK], lastErr = 'unknown';
+  for (var m = 0; m < models.length; m++) {
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      var res = callGemini(models[m], b64);
+      if (res.ok) return { success: true, data: res.data, model: models[m] };
+      lastErr = res.error;
+      if (!res.retryable) break;          // auth/bad-request: next model, don't hammer
+      Utilities.sleep(attempt * 2000);
+    }
+  }
+  return { success: false, error: lastErr };
+}
+
 /** POST — one expense, with an optional base64 receipt image. */
 function doPost(e) {
   try {
     var payload = JSON.parse(e.parameter.payload);
 
+    if (payload.action === 'scan')    return json(scanReceipt(payload.imageBase64));
     if (payload.action === 'migrate') return json(migrateSheet());
 
     // Store the image first so the row carries its link
