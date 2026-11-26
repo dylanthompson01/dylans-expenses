@@ -517,6 +517,10 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 .lock-screen{position:fixed;inset:0;z-index:500;display:flex;align-items:center;justify-content:center;padding:24px 16px;
   background:linear-gradient(158deg,#F6EFE3 0%,#F1E9DB 46%,#EBE1D0 100%);}
 .lock-screen[hidden]{display:none;}
+/* While locked, stop painting the app and the drifting background behind
+   the lock card, so typing the passcode stays smooth on slower devices */
+body.is-locked .app{visibility:hidden;}
+body.is-locked::after{animation:none;}
 .lock-card{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);padding:34px 26px 24px;text-align:center;
   box-shadow:var(--sh-4),var(--sh-inset);display:flex;flex-direction:column;gap:14px;animation:modalIn 0.42s var(--ease-spring) both;}
 .lock-icon{width:64px;height:64px;border-radius:50%;background:var(--green-dim);display:flex;align-items:center;justify-content:center;margin:0 auto 2px;box-shadow:inset 0 0 0 1px rgba(58,102,68,0.12);}
@@ -1290,10 +1294,11 @@ function showLock(msg){
   const el=document.getElementById('lockScreen');
   if(!el) return;
   el.hidden=false;
+  document.body.classList.add('is-locked');
   document.getElementById('lockError').textContent=(msg&&msg!=='Passcode required')?msg:'';
   setTimeout(()=>document.getElementById('lockInput')?.focus(),60);
 }
-function hideLock(){ const el=document.getElementById('lockScreen'); if(el) el.hidden=true; }
+function hideLock(){ const el=document.getElementById('lockScreen'); if(el) el.hidden=true; document.body.classList.remove('is-locked'); }
 function isLocked(){ return !document.getElementById('lockScreen').hidden; }
 
 async function unlock(ev){
@@ -1309,7 +1314,6 @@ async function unlock(ev){
   btn.disabled=false; btn.innerHTML='<i class="bi bi-unlock-fill"></i> Unlock';
   if(ok){
     input.value='';
-    bankState=null;
     updateBadge(); updateSyncStatus(); renderActiveTab();
     toast('✓ Unlocked');
   } else if(!isLocked()){
@@ -1321,7 +1325,7 @@ async function unlock(ev){
 
 // Forget the passcode and every cached expense on this device
 function lockDevice(){
-  ['exp_key','ucf_expenses_v2','exp_budgets','exp_share','last_sync'].forEach(store.del);
+  ['exp_key','ucf_expenses_v2','exp_budgets','exp_share','exp_bank','last_sync'].forEach(store.del);
   expenses=[]; budgets={}; bankState=null;
   updateBadge(); renderActiveTab();
   showLock('');
@@ -1353,11 +1357,19 @@ function normalizeAll(list){ return (list||[]).map(normalizeExpense); }
 
 // Returns true only when fresh data came back from the Sheet. On a wrong or
 // missing passcode it shows the lock screen; offline, it keeps the cache.
-let lastLoadError='';
-async function loadExpenses() {
+let lastLoadError='', lastLoadAt=0, loadInFlight=null;
+// Shared by everyone who asks at the same moment, so a tab switch during a
+// refresh doesn't start a second download.
+function loadExpenses(fresh=false){
+  if(loadInFlight && !fresh) return loadInFlight;
+  const p=_loadExpensesNow(fresh).finally(()=>{ if(loadInFlight===p) loadInFlight=null; });
+  loadInFlight=p;
+  return p;
+}
+async function _loadExpensesNow(fresh) {
   lastLoadError='';
   try {
-    const data = await apiGet({ action: 'load', key: getKey() });
+    const data = await apiGet({ action: 'load', key: getKey(), compact: '1', ...(fresh ? { fresh: '1' } : {}) });
     if (data.locked) {
       backendVersion = data.apiVersion || 2;
       showLock(getKey() ? data.error : '');
@@ -1367,9 +1379,15 @@ async function loadExpenses() {
     if (!data.success) throw new Error(data.error || 'Unexpected response');
     backendVersion = data.apiVersion || 1;   // the old script sends no version
     hideLock();
-    expenses = normalizeAll(data.expenses || []);
+    // Compact format: field names once, one array per expense
+    const list = Array.isArray(data.rows) && Array.isArray(data.fields)
+      ? data.rows.map(r => { const o = { savedToGoogle: true }; data.fields.forEach((f, i) => { o[f] = r[i]; }); return o; })
+      : (data.expenses || []);
+    expenses = normalizeAll(list);
     persistExpenses();
     if (data.budgets && typeof data.budgets === 'object') { budgets = data.budgets; persistBudgets(); }
+    if (data.bank && data.bank.success) { bankState = data.bank; store.set('exp_bank', JSON.stringify(bankState)); }
+    lastLoadAt = Date.now();
     return true;
   } catch(e) {
     lastLoadError = errMsg(e);
@@ -1381,20 +1399,40 @@ async function loadExpenses() {
   return false;
 }
 
+// A cheap fingerprint of everything on screen, so a background refresh only
+// redraws (and replays chart animations) when something actually changed.
+function dataSig(){
+  const s=JSON.stringify(expenses)+JSON.stringify(budgets)+JSON.stringify(bankState);
+  let h=5381; for(let i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0;
+  return h+':'+s.length;
+}
+// Show what's in memory right away; fetch in the background if it's older
+// than a minute; redraw only on a real change.
+async function refreshIfStale(maxAge=60000){
+  if(isLocked() || Date.now()-lastLoadAt<maxAge) return;
+  const before=dataSig();
+  const ok=await loadExpenses();
+  if(!ok) return;
+  store.set('last_sync',new Date().toISOString());
+  updateSyncStatus(); updateBadge();
+  if(dataSig()!==before) renderActiveTab();
+}
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') refreshIfStale(); });
+
 async function refreshFromSheets() {
   const btn = document.getElementById('refreshBtn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Refreshing…'; }
-  const ok = await loadAndRenderDashboard();
+  const ok = await loadAndRenderDashboard(true);
   if (btn) { btn.disabled = false; btn.innerHTML = '↻ Refresh'; }
   if (ok) toast('✓ Refreshed ' + expenses.length + ' expenses');
   else if (!isLocked()) toast('Couldn’t reach Google — showing saved data', true);
 }
 
-async function loadAndRenderDashboard() {
+async function loadAndRenderDashboard(fresh=false) {
   const lastSyncEl = document.getElementById('lastSyncText');
   if (lastSyncEl) lastSyncEl.textContent = 'Syncing…';
 
-  const fromSheets = await loadExpenses();
+  const fromSheets = await loadExpenses(fresh);
   updateBadge();
 
   const now = new Date().toLocaleString();
@@ -1418,10 +1456,12 @@ function showTab(id){
     document.getElementById('tab-btn-'+t).classList.toggle('active',t===id);
   });
   if(id!=='reimb') document.getElementById('reimbBar').hidden=true;
-  if(id==='dashboard') loadAndRenderDashboard();
+  // Every tab draws from memory instantly; data refreshes in the background
+  if(id==='dashboard') { if(expenses.length) renderCharts(); else loadAndRenderDashboard(); }
   if(id==='list')      ensureDataThen(renderList);
   if(id==='table')     ensureDataThen(renderTable);
   if(id==='reimb')     ensureDataThen(renderReimb);
+  if(expenses.length) refreshIfStale();
   updateBadge();
 }
 // Redraw whatever is on screen after data changes
@@ -3167,13 +3207,15 @@ updateBadge = function () {
   }
 };
 
-// Shimmer the metric values while a sync is in flight
+// Shimmer the metric values while a sync is in flight — only when there's
+// nothing to show yet; otherwise the current numbers stay readable.
 const _loadAndRenderDashboard = loadAndRenderDashboard;
-loadAndRenderDashboard = async function () {
+loadAndRenderDashboard = async function (...args) {
   const metrics = document.querySelectorAll('#tab-dashboard .metric');
-  metrics.forEach(m => m.classList.add('loading'));
-  try { return await _loadAndRenderDashboard(); }
-  finally { metrics.forEach(m => m.classList.remove('loading')); }
+  const shimmer = !expenses.length;
+  if (shimmer) metrics.forEach(m => m.classList.add('loading'));
+  try { return await _loadAndRenderDashboard(...args); }
+  finally { if (shimmer) metrics.forEach(m => m.classList.remove('loading')); }
 };
 
 // ─── TOP PROGRESS BAR ───
@@ -3192,9 +3234,9 @@ function progressStop(){
   }
 }
 const _loadExpenses = loadExpenses;
-loadExpenses = async function(){
+loadExpenses = async function(...args){
   progressStart();
-  try { return await _loadExpenses(); }
+  try { return await _loadExpenses(...args); }
   finally { progressStop(); }
 };
 
@@ -3268,18 +3310,21 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
   // 1. Show cached data immediately
   try { expenses = normalizeAll(JSON.parse(store.get('ucf_expenses_v2', '[]'))); } catch { expenses = []; }
   try { budgets = JSON.parse(store.get('exp_budgets', '{}')) || {}; } catch { budgets = {}; }
+  try { bankState = JSON.parse(store.get('exp_bank', 'null')); } catch { bankState = null; }
   updateBadge();
   checkSetup();
   updateInstallRow();
+  renderActiveTab();
 
-  // 2. Fetch from Sheets in background — when done, re-render active tab
+  // 2. Fetch from Sheets in background — redraw only if something changed
+  const before = dataSig();
   const fromSheets = await loadExpenses();
   updateBadge();
   if (fromSheets) store.set('last_sync', new Date().toISOString());
   updateSyncStatus();
 
   // 3. Re-render whichever tab is currently open
-  renderActiveTab();
+  if (dataSig() !== before) renderActiveTab();
 
   // 4. Start the motion layer
   restoreRail();

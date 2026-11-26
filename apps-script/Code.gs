@@ -138,8 +138,13 @@ function formatDate(v) {
   return s.slice(0, 10);
 }
 
+// Opening the spreadsheet is one of the slowest calls in Apps Script, so
+// each request opens it once and reuses it.
+var _book = null;
+function book() { return _book || (_book = SpreadsheetApp.openById(SHEET_ID)); }
+
 function getSheet() {
-  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var ss = book();
   var sh = ss.getSheetByName(TAB_NAME) || ss.getSheets()[0];
   if (sh.getMaxColumns() < HEADERS.length) {
     sh.insertColumnsAfter(sh.getMaxColumns(), HEADERS.length - sh.getMaxColumns());
@@ -151,12 +156,55 @@ function getSheet() {
   return sh;
 }
 
-/** One writer at a time, so two saves can't shift each other's rows. */
+/** One writer at a time, so two saves can't shift each other's rows.
+    Every write goes through here, so it's also where the cached copy of
+    the data is invalidated. */
 function withLock(fn) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
-  try { return fn(); } finally { lock.releaseLock(); }
+  try { var out = fn(); bumpData(); return out; } finally { lock.releaseLock(); }
 }
+
+/* ===================================================================
+   LOAD CACHE
+
+   Reading 500+ rows from the Sheet takes about a second. The result is
+   kept in CacheService under the current data version; any write through
+   the app bumps the version, so a stale copy is never served. Edits typed
+   straight into the Sheet show up within 5 minutes, or at once with the
+   app's Refresh button (which asks for fresh data).
+   =================================================================== */
+
+function dataVersion() { return PropertiesService.getScriptProperties().getProperty('DATA_VER') || '0'; }
+function bumpData() {
+  PropertiesService.getScriptProperties().setProperty('DATA_VER', Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+}
+var CACHE_CHUNK = 30000;          // characters; stays under the 100 KB per-key limit
+function cachePutLoad(ver, data) {
+  try {
+    var s = JSON.stringify(data), parts = {}, n = Math.ceil(s.length / CACHE_CHUNK) || 1;
+    for (var i = 0; i < n; i++) parts['L:' + ver + ':' + i] = s.slice(i * CACHE_CHUNK, (i + 1) * CACHE_CHUNK);
+    parts['L:' + ver] = String(n);
+    CacheService.getScriptCache().putAll(parts, 300);
+  } catch (e) { /* too big or cache unavailable: just don't cache */ }
+}
+function cacheGetLoad(ver) {
+  try {
+    var c = CacheService.getScriptCache(), n = Number(c.get('L:' + ver) || 0);
+    if (!n) return null;
+    var keys = [];
+    for (var i = 0; i < n; i++) keys.push('L:' + ver + ':' + i);
+    var got = c.getAll(keys), s = '';
+    for (var k = 0; k < keys.length; k++) { if (got[keys[k]] == null) return null; s += got[keys[k]]; }
+    return JSON.parse(s);
+  } catch (e) { return null; }
+}
+
+// Compact load format: field names once, then one array per expense.
+// About half the size of sending an object per row.
+var FIELDS = ['id', 'timestamp', 'place', 'category', 'date', 'amount', 'semester', 'receiptType',
+              'receiptUrl', 'needsReimb', 'reimbursed', 'notes', 'is529', 'bankTxnId', 'account',
+              'bankCategory', 'sortedBy', 'review'];
 
 /* ===================================================================
    PASSCODE
@@ -197,33 +245,65 @@ function doGet(e) {
     if (p.action === 'reimb') return json(shareView(p.share));
     var err = checkKey(p.key);
     if (err) return lockedResponse(err);
-    return json(loadAll());
+    return json(loadAll(p.compact === '1', p.fresh === '1'));
   } catch (err2) {
     return json({ success: false, error: String(err2), apiVersion: API_VERSION });
   }
 }
 
-function loadAll() {
-  var sh = getSheet();
-  ensureIds(sh);
-  var out = readExpenses(sh);
-  return { success: true, apiVersion: API_VERSION, expenses: out, count: out.length,
-           budgets: readBudgets() };
-}
-
-function readExpenses(sh) {
-  var last = sh.getLastRow();
-  var out = [];
-  if (last > 1) {
-    var values = sh.getRange(2, 1, last - 1, HEADERS.length).getValues();
-    for (var i = 0; i < values.length; i++) {
-      var row = values[i];
-      if (!row[1] && !row[4]) continue;          // skip blank rows
-      out.push(toObject(row, i));
-    }
+/**
+ * Everything the app needs on open: expenses, budgets and bank status,
+ * in one request.
+ * @param compact  send FIELDS + rows instead of one object per expense
+ * @param fresh    skip the cache (the app's Refresh button)
+ */
+function loadAll(compact, fresh) {
+  var ver = dataVersion();
+  var data = fresh ? null : cacheGetLoad(ver);
+  var cached = !!data;
+  if (!data) {
+    var sh = getSheet();
+    var values = readValues(sh);                      // one read, not three
+    if (valuesMissingIds(values)) { ensureIds(sh); values = readValues(sh); }
+    ver = dataVersion();                              // ensureIds may have written
+    var objs = valuesToObjects(values);
+    data = { rows: objs.map(function (o) { return FIELDS.map(function (f) { return o[f]; }); }),
+             budgets: readBudgets() };
+    cachePutLoad(ver, data);
+  }
+  var out = { success: true, apiVersion: API_VERSION, count: data.rows.length, budgets: data.budgets,
+              cached: cached, bank: bankStatus() };
+  if (compact) { out.fields = FIELDS; out.rows = data.rows; }
+  else {
+    out.expenses = data.rows.map(function (r) {
+      var o = { savedToGoogle: true };
+      for (var i = 0; i < FIELDS.length; i++) o[FIELDS[i]] = r[i];
+      return o;
+    });
   }
   return out;
 }
+
+function readValues(sh) {
+  var last = sh.getLastRow();
+  return last > 1 ? sh.getRange(2, 1, last - 1, HEADERS.length).getValues() : [];
+}
+function valuesToObjects(values) {
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (!row[1] && !row[4]) continue;            // skip blank rows
+    out.push(toObject(row, i));
+  }
+  return out;
+}
+function valuesMissingIds(values) {
+  for (var i = 0; i < values.length; i++) {
+    if (!values[i][ID_COL - 1] && (values[i][1] || values[i][4])) return true;
+  }
+  return false;
+}
+function readExpenses(sh) { return valuesToObjects(readValues(sh)); }
 
 /** Give every row an ID the first time it's seen — including rows typed
     straight into the sheet. Runs under the lock and re-reads inside it, so
@@ -569,7 +649,7 @@ function deleteExpense(id) {
     if (row < 0) return { success: true, missing: true };
     var values = sh.getRange(row, 1, 1, HEADERS.length).getValues()[0];
 
-    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var ss = book();
     var bin = ss.getSheetByName(DELETED_TAB);
     if (!bin) {
       bin = ss.insertSheet(DELETED_TAB);
@@ -591,7 +671,7 @@ function deleteExpense(id) {
    =================================================================== */
 
 function budgetSheet(create) {
-  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var ss = book();
   var sh = ss.getSheetByName(BUDGET_TAB);
   if (!sh && create) {
     sh = ss.insertSheet(BUDGET_TAB);
@@ -1303,7 +1383,7 @@ function applyBankChanges(it, added, modified, removed) {
       }
       gone.sort(function (x, y) { return y - x; });
       if (gone.length) {
-        var ss = SpreadsheetApp.openById(SHEET_ID);
+        var ss = book();
         var bin = ss.getSheetByName(DELETED_TAB) || ss.insertSheet(DELETED_TAB);
         if (bin.getLastRow() === 0) bin.appendRow(HEADERS.concat(['Deleted At']));
         for (var g = 0; g < gone.length; g++) {
