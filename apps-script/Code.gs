@@ -41,15 +41,21 @@ var HEADERS = [
   'Have You Been Reimbursed',
   'Additional Info',
   'Is This A 529 Expense',
-  'ID'                        // stable row id, so edits and deletes hit the right row
+  'ID',                       // stable row id, so edits and deletes hit the right row
+  'Bank Txn ID',              // Plaid transaction_id — proof the charge happened, and dedupe key
+  'Account',                  // e.g. "Chase •4321"
+  'Bank Category',            // Plaid's own label, e.g. FOOD_AND_DRINK_GROCERIES
+  'Sorted By',                // why it's 529 or not: You / Your history / Bank category / Store name / AI / Receipt
+  'Needs Review'              // "Yes" when the app couldn't decide 529 on its own
 ];
 var ID_COL = 13;              // 1-based column of 'ID'
+var COL = { txn: 14, account: 15, bankCat: 16, sortedBy: 17, review: 18 };   // 1-based
 
 // Allowed values, used to build the in-sheet dropdowns and to validate edits
 var CATEGORIES    = ['Food & Dining','Tuition & Fees','Books & Supplies','Housing',
                      'Transportation','Technology','Healthcare','Entertainment',
                      'Clothing','Personal Care','School Supplies','Other'];
-var RECEIPT_TYPES = ['Receipt','Bank Statement'];
+var RECEIPT_TYPES = ['Receipt','Bank Statement','Bank Transaction'];
 var YES_NO        = ['Yes','No'];
 var YES_NO_MAYBE  = ['Yes','No','Not Sure'];
 
@@ -84,7 +90,12 @@ function toRow(e) {
     e.reimbursed || 'No',
     e.notes || '',
     e.is529 || 'Not Sure',
-    e.id || newId()
+    e.id || newId(),
+    e.bankTxnId || '',
+    e.account || '',
+    e.bankCategory || '',
+    e.sortedBy || '',
+    e.review || ''
   ];
 }
 
@@ -104,6 +115,11 @@ function toObject(row, index) {
     reimbursed:  row[9] ? String(row[9]) : 'No',
     notes:       row[10] ? String(row[10]) : '',
     is529:       row[11] ? String(row[11]) : 'Not Sure',
+    bankTxnId:   row[13] ? String(row[13]) : '',
+    account:     row[14] ? String(row[14]) : '',
+    bankCategory: row[15] ? String(row[15]) : '',
+    sortedBy:    row[16] ? String(row[16]) : '',
+    review:      row[17] ? String(row[17]) : '',
     savedToGoogle: true
   };
 }
@@ -383,6 +399,12 @@ function doPost(e) {
     if (action === 'saveBudgets') return json(saveBudgets(payload.budgets || {}));
     if (action === 'shareLink')   return json({ success: true, share: getShareKey(!!payload.reset) });
     if (action === 'migrate')     return json(migrateSheet());
+    // Automatic bank import (Plaid)
+    if (action === 'bankStatus')    return json(bankStatus());
+    if (action === 'bankLinkToken') return json(bankLinkToken(payload.itemId));
+    if (action === 'bankExchange')  return json(bankExchange(payload.publicToken, payload.institution));
+    if (action === 'bankSync')      return json(syncAllBanks());
+    if (action === 'bankRemove')    return json(bankRemove(payload.itemId));
     return json({ success: false, error: 'Unknown action: ' + action });
   } catch (err2) {
     return json({ success: false, error: String(err2) });
@@ -438,8 +460,27 @@ function addExpense(p) {
       return { success: true, duplicate: true, id: id,
                expense: toObject(sh.getRange(again, 1, 1, HEADERS.length).getValues()[0], again - 2) };
     }
+    // Receipt for a charge the bank already imported: attach it there. The
+    // receipt shows what was bought, so its 529 answer replaces the guess.
+    if (p.receiptType !== 'Bank Transaction') {
+      var bankRow = matchBankRow(sh, p.place, Number(p.amount) || 0, String(p.date || ''));
+      if (bankRow > 0) {
+        if (receiptUrl) sh.getRange(bankRow, 8).setValue(receiptUrl);
+        var fields = { place: p.place, category: p.category, is529: p.is529, notes: p.notes,
+                       needsReimb: p.needsReimb };
+        for (var f in fields) {
+          if (fields[f] == null || fields[f] === '') continue;
+          sh.getRange(bankRow, EDITABLE[f] + 1).setValue(cleanValue(f, fields[f]));
+        }
+        sh.getRange(bankRow, COL.sortedBy).setValue('Receipt');
+        sh.getRange(bankRow, COL.review).setValue('');
+        var merged = toObject(sh.getRange(bankRow, 1, 1, HEADERS.length).getValues()[0], bankRow - 2);
+        return { success: true, merged: true, id: merged.id, receiptUrl: merged.receiptUrl, expense: merged };
+      }
+    }
     p.id = id;
     p.receiptUrl = receiptUrl;
+    if (!p.sortedBy) p.sortedBy = 'Receipt';
     var row = toRow(p);
     sh.appendRow(row);
     return { success: true, id: id, receiptUrl: receiptUrl, expense: toObject(row, 0) };
@@ -452,8 +493,10 @@ var EDITABLE = { place: 1, category: 2, date: 3, amount: 4, semester: 5, receipt
 
 function cleanValue(field, v) {
   if (field === 'amount') {
+    // Negative is allowed: bank refunds come in as negative amounts, and
+    // a refunded 529 purchase has to reduce the 529 total.
     var n = Math.round((Number(v) || 0) * 100) / 100;
-    if (n < 0) throw new Error('Amount cannot be negative');
+    if (!isFinite(n)) throw new Error('Amount must be a number');
     return n;
   }
   if (field === 'date') {
@@ -489,16 +532,29 @@ function updateExpenses(ids, changes) {
   }
   if (!Object.keys(clean).length) return { success: false, error: 'Nothing to change' };
 
+  // Choosing 529 or a category yourself is the strongest signal there is:
+  // the row is marked "You", leaves the review list, and teaches the sorter.
+  var taught = clean.hasOwnProperty('is529') || clean.hasOwnProperty('category');
+
   return withLock(function () {
     var sh = getSheet();
-    var updated = [], missing = [];
+    var updated = [], missing = [], merchants = {};
     for (var i = 0; i < ids.length; i++) {
       var row = findRow(sh, ids[i]);
       if (row < 0) { missing.push(ids[i]); continue; }
       for (var f in clean) sh.getRange(row, EDITABLE[f] + 1).setValue(clean[f]);
-      updated.push(toObject(sh.getRange(row, 1, 1, HEADERS.length).getValues()[0], row - 2));
+      if (taught) {
+        sh.getRange(row, COL.sortedBy).setValue('You');
+        sh.getRange(row, COL.review).setValue('');
+      }
+      var obj = toObject(sh.getRange(row, 1, 1, HEADERS.length).getValues()[0], row - 2);
+      if (taught) merchants[merchantKey(obj.place)] = true;
+      updated.push(obj);
     }
-    return { success: missing.length === 0, updated: updated, missing: missing,
+    // Other charges from the same store still waiting on you get re-sorted now
+    var resorted = taught ? resortReviewRows(sh, merchants) : [];
+    return { success: missing.length === 0, updated: updated.concat(resorted), missing: missing,
+             resorted: resorted.length,
              error: missing.length ? missing.length + ' expense(s) not found — refresh and try again' : undefined };
   });
 }
@@ -614,6 +670,704 @@ function shareView(share) {
     });
   }
   return { success: true, items: items, generated: new Date().toISOString() };
+}
+
+/* ===================================================================
+   529 SORTER — for charges that arrive from the bank
+
+   Deterministic first, AI last, and never a guess on a mixed store:
+     1. Payment apps (Venmo, Zelle…) can't be sorted from the charge alone.
+     2. Your history: how this store has been labeled before. A store you
+        corrected yourself counts triple. It takes 80% agreement, so a store
+        you've labeled both ways (Walmart groceries vs. Walmart clothes) is
+        never guessed from history.
+     3. Words that always decide it: student loans, certification exams,
+        tuition/bursar, campus dining, parking.
+     4. Plaid's own category (groceries vs. restaurants, rent, bookstores…)
+        when Plaid is confident — with the store-name food rules on top.
+     5. The same store-name food rules the app uses for receipts.
+     6. Gemini, given only the store, Plaid's label and the amount.
+   Whatever is still unclear is "Not Sure" and goes to Needs a look.
+   Every row records which step decided it, in "Sorted By".
+   =================================================================== */
+
+// Plaid detailed category -> [app category, 529]
+var PFC_MAP = {
+  FOOD_AND_DRINK_GROCERIES:                       ['Food & Dining', 'Yes'],   // room & board
+  FOOD_AND_DRINK_RESTAURANT:                      ['Food & Dining', 'No'],
+  FOOD_AND_DRINK_FAST_FOOD:                       ['Food & Dining', 'No'],
+  FOOD_AND_DRINK_COFFEE:                          ['Food & Dining', 'No'],
+  FOOD_AND_DRINK_BEER_WINE_AND_LIQUOR:            ['Food & Dining', 'No'],
+  FOOD_AND_DRINK_VENDING_MACHINES:                ['Food & Dining', 'No'],
+  FOOD_AND_DRINK_OTHER_FOOD_AND_DRINK:            ['Food & Dining', 'Not Sure'],
+  RENT_AND_UTILITIES_RENT:                        ['Housing', 'Yes'],
+  RENT_AND_UTILITIES_GAS_AND_ELECTRICITY:         ['Housing', 'Yes'],
+  RENT_AND_UTILITIES_WATER:                       ['Housing', 'Yes'],
+  RENT_AND_UTILITIES_SEWAGE_AND_WASTE_MANAGEMENT: ['Housing', 'Yes'],
+  RENT_AND_UTILITIES_OTHER_UTILITIES:             ['Housing', 'Yes'],
+  RENT_AND_UTILITIES_INTERNET_AND_CABLE:          ['Technology', 'Yes'],      // internet access qualifies
+  RENT_AND_UTILITIES_TELEPHONE:                   ['Technology', 'No'],       // phone plans generally don't
+  GENERAL_MERCHANDISE_BOOKSTORES_AND_NEWSSTANDS:  ['Books & Supplies', 'Yes'],
+  GENERAL_MERCHANDISE_OFFICE_SUPPLIES:            ['School Supplies', 'Yes'],
+  GENERAL_MERCHANDISE_ELECTRONICS:                ['Technology', 'Yes'],
+  GENERAL_MERCHANDISE_CLOTHING_AND_ACCESSORIES:   ['Clothing', 'No'],
+  GENERAL_MERCHANDISE_SPORTING_GOODS:             ['Entertainment', 'No'],
+  GENERAL_MERCHANDISE_GIFTS_AND_NOVELTIES:        ['Other', 'No'],
+  GENERAL_MERCHANDISE_PET_SUPPLIES:               ['Other', 'No'],
+  GENERAL_MERCHANDISE_TOBACCO_AND_VAPE:           ['Other', 'No'],
+  // Stores that sell everything: the charge alone can't say what you bought
+  GENERAL_MERCHANDISE_SUPERSTORES:                ['Other', 'Not Sure'],
+  GENERAL_MERCHANDISE_ONLINE_MARKETPLACES:        ['Other', 'Not Sure'],
+  GENERAL_MERCHANDISE_DEPARTMENT_STORES:          ['Other', 'Not Sure'],
+  GENERAL_MERCHANDISE_DISCOUNT_STORES:            ['Other', 'Not Sure'],
+  GENERAL_MERCHANDISE_CONVENIENCE_STORES:         ['Food & Dining', 'Not Sure'],
+  GENERAL_MERCHANDISE_OTHER_GENERAL_MERCHANDISE:  ['Other', 'Not Sure'],
+  GENERAL_SERVICES_EDUCATION:                     ['Tuition & Fees', 'Yes'],
+  HOME_IMPROVEMENT_FURNITURE:                     ['Housing', 'Not Sure'],
+  LOAN_PAYMENTS_STUDENT_LOAN_PAYMENT:             ['Other', 'Yes'],           // $10,000 lifetime cap
+  MEDICAL_PHARMACIES_AND_SUPPLEMENTS:             ['Healthcare', 'No']
+};
+// Fallback by Plaid primary category
+var PFC_PRIMARY_MAP = {
+  ENTERTAINMENT:            ['Entertainment', 'No'],
+  PERSONAL_CARE:            ['Personal Care', 'No'],
+  MEDICAL:                  ['Healthcare', 'No'],
+  TRANSPORTATION:           ['Transportation', 'No'],
+  TRAVEL:                   ['Transportation', 'No'],
+  BANK_FEES:                ['Other', 'No'],
+  GOVERNMENT_AND_NON_PROFIT:['Other', 'No'],
+  GENERAL_SERVICES:         ['Other', 'No'],
+  HOME_IMPROVEMENT:         ['Other', 'No'],
+  FOOD_AND_DRINK:           ['Food & Dining', 'Not Sure'],
+  RENT_AND_UTILITIES:       ['Housing', 'Yes']
+};
+
+// Same lists as index.html's receipt rules — keep the two in step.
+var CAMPUS_FOOD = ['meal plan','dining hall','campus dining','dining dollars','knights cash',
+  'meal swipe','dining services','ucf dining','student union food'];
+var RESTAURANT_SIGNALS = ['pizza','grill','cafe','café','kitchen','burger','sandwich','taco',
+  'sushi','diner','bistro','wings','bbq','barbecue','steakhouse','noodle','ramen','pho',
+  'buffet','bakery','coffee','espresso','juice','smoothie','creamery','ice cream','donut',
+  'bagel','pub','tavern','cantina','grille','eatery','restaurant','chicken','wok','curry'];
+var RESTAURANT_CHAINS = ['chipotle','panda express','chick-fil-a','chick fil a','chik fil a',
+  'chickfila','zaxby','mcdonald','burger king','wendy','taco bell','subway','panera','starbucks',
+  'dunkin','popeye','raising cane','five guys','jimmy john','jersey mike','moe\'s','qdoba',
+  'halal guys','domino','papa john','kfc','arby','sonic drive','whataburger','in-n-out',
+  'shake shack','olive garden','chili\'s','applebee','ihop','denny','waffle house','huey magoo',
+  'dippin','insomnia cookie','crumbl','jamba','tropical smoothie','acai','açaí','poke',
+  'firehouse','potbelly','sweetgreen','cava','nando','wingstop','checkers','culver',
+  'steak n shake','steak \'n shake','little caesar','marco\'s','hungry howie','bojangles',
+  'la granja','pollo tropical','miller\'s ale','buffalo wild','hooters','twin peaks',
+  'doordash','uber eats','ubereats','grubhub'];
+var GROCERY_CHAINS = ['walmart','publix','costco','kroger','aldi','trader joe','whole foods',
+  'winn dixie','winn-dixie','safeway','sprouts','lidl','food lion','h-e-b','heb','ingles',
+  'piggly wiggly','price chopper','shoprite','stop & shop','meijer','harris teeter','wegmans',
+  'sam\'s club','bj\'s wholesale','fresh market','fresh thyme','earth fare','sedano','presidente',
+  'bravo supermarket','patel brothers','h mart','99 ranch','ifresh','natural grocers','winco',
+  'hy-vee','albertsons','vons','ralphs','fred meyer','king soopers','jewel-osco','hannaford',
+  'food 4 less','save a lot','giant eagle','giant food','stater bros','raley','wawa food',
+  'target','walgreens','cvs','instacart'];
+var GROCERY_TOKENS = ['grocery','groceries','grocer','supermarket','supermercado',
+  'market','mart','bodega','produce','butcher'];
+
+function foodIs529(text) {
+  var t = ' ' + String(text || '').toLowerCase() + ' ';
+  function wordish(w) {
+    return new RegExp('(^|[^a-z])' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(s|es)?([^a-z]|$)').test(t);
+  }
+  function has(list) { for (var i = 0; i < list.length; i++) if (t.indexOf(list[i]) !== -1) return true; return false; }
+  function hasWord(list) { for (var i = 0; i < list.length; i++) if (wordish(list[i])) return true; return false; }
+  if (has(CAMPUS_FOOD)) return 'Yes';
+  if (has(RESTAURANT_CHAINS)) return 'No';
+  if (hasWord(RESTAURANT_SIGNALS)) return 'No';
+  if (has(GROCERY_CHAINS)) return 'Yes';
+  if (hasWord(GROCERY_TOKENS)) return 'Yes';
+  return 'Not Sure';
+}
+
+var P2P_RE = /venmo|zelle|cash ?app|square cash|paypal|apple cash/i;
+
+/** Store name for a bank charge: Plaid's cleaned merchant, else a tidied raw line. */
+function bankPlace(t) {
+  if (t.merchant_name) return String(t.merchant_name).slice(0, 60);
+  var cp = (t.counterparties || [])[0];
+  if (cp && cp.name) return String(cp.name).slice(0, 60);
+  var s = String(t.name || '')
+    .replace(/^(sq|tst|pp|sp|py)\s*\*\s*/i, '')
+    .replace(/\b(pos|debit|purchase|card|recurring|checkcard|ach)\b/gi, ' ')
+    .replace(/#?\d{3,}/g, ' ')
+    .replace(/\s{2,}/g, ' ').trim();
+  s = s.toLowerCase().replace(/\b[a-z]/g, function (c) { return c.toUpperCase(); });
+  return s.slice(0, 60) || 'Unknown';
+}
+
+/** "Publix Super Markets #1234" and "PUBLIX" both become "publix". */
+function merchantKey(name) {
+  var s = String(name || '').toLowerCase()
+    .replace(/\.com\b/g, '')
+    .replace(/['’`.\-]/g, '')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\b(the|inc|llc|co|store|stores|supercenter)\b/g, ' ');
+  var t = s.split(/\s+/).filter(function (w) { return w && !/^\d+$/.test(w); });
+  if (!t.length) return '';
+  return t[0].length >= 3 ? t[0] : t.slice(0, 2).join(' ');
+}
+
+function isP2P(t) {
+  if (t.merchant_name) return P2P_RE.test(t.merchant_name);
+  var cp = (t.counterparties || [])[0];
+  return P2P_RE.test(String(t.name || '')) || !!(cp && P2P_RE.test(String(cp.name || '')));
+}
+
+/** Money that isn't spending: income, transfers between your own accounts,
+    card payments (the purchases themselves are already counted), ATM cash. */
+function isNotSpending(t) {
+  var pfc = t.personal_finance_category || {};
+  var pr = pfc.primary || '', det = pfc.detailed || '';
+  if (isP2P(t)) return t.amount < 0;                   // money sent to you
+  if (pr === 'INCOME' || pr === 'TRANSFER_IN') return true;
+  if (pr === 'TRANSFER_OUT') return true;
+  if (pr === 'LOAN_PAYMENTS' && det !== 'LOAN_PAYMENTS_STUDENT_LOAN_PAYMENT') return true;
+  return false;
+}
+
+/** How you've labeled each store so far: key -> { yes, no, cats }. */
+function buildHistory(rows) {
+  var h = {};
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (!r[1]) continue;
+    var is = String(r[11]);
+    if (is !== 'Yes' && is !== 'No') continue;
+    var by = String(r[16] || '');
+    var fromBank = String(r[6]) === 'Bank Transaction';
+    var w = by === 'You' ? 3 : (!fromBank && (by === '' || by === 'Receipt') ? 1 : 0);
+    if (!w) continue;                                  // auto-sorted rows never vote
+    var key = merchantKey(r[1]);
+    if (!key) continue;
+    var e = h[key] || (h[key] = { yes: 0, no: 0, cats: {} });
+    if (is === 'Yes') e.yes += w; else e.no += w;
+    var cat = String(r[2] || 'Other');
+    e.cats[cat] = (e.cats[cat] || 0) + w;
+  }
+  return h;
+}
+
+function historyVote(h, key) {
+  var e = h[key];
+  if (!e) return null;
+  var total = e.yes + e.no;
+  if (total < 2) return null;
+  if (Math.max(e.yes, e.no) / total < 0.8) return null;
+  var best = 'Other', bestW = -1;
+  for (var c in e.cats) if (e.cats[c] > bestW) { best = c; bestW = e.cats[c]; }
+  return { is529: e.yes >= e.no ? 'Yes' : 'No', category: best };
+}
+
+function keywordVerdict(text) {
+  var t = String(text || '').toLowerCase();
+  if (/student loan|loan payment|sallie mae|nelnet|mohela|navient|aidvantage/.test(t)) return ['Other', 'Yes'];
+  if (/apprentice/.test(t)) return ['Other', 'Yes'];
+  if (/certification|licensure|license exam|pearson vue|prometric|comptia|ncees/.test(t)) return ['Tuition & Fees', 'Yes'];
+  if (/tuition|bursar|registrar|student account/.test(t)) return ['Tuition & Fees', 'Yes'];
+  if (/parking|park mobile|parkmobile/.test(t)) return ['Transportation', 'No'];
+  for (var i = 0; i < CAMPUS_FOOD.length; i++) if (t.indexOf(CAMPUS_FOOD[i]) !== -1) return ['Food & Dining', 'Yes'];
+  return null;
+}
+
+/**
+ * Decide category and 529 for one bank charge.
+ * @param ai  budget object { left: n } so one sync can't make hundreds of AI calls
+ */
+function classifyCharge(t, history, ai) {
+  var place = bankPlace(t);
+  var pfc = t.personal_finance_category || {};
+  var det = pfc.detailed || '', pr = pfc.primary || '';
+  var confident = ['LOW', 'UNKNOWN'].indexOf(String(pfc.confidence_level || '').toUpperCase()) === -1;
+  var text = place + ' ' + String(t.name || '');
+
+  if (isP2P(t)) return { category: 'Other', is529: 'Not Sure', sortedBy: 'Needs you',
+                         notes: 'Payment app — what was it for?' };
+
+  var h = historyVote(history, merchantKey(place));
+  if (h) return { category: h.category, is529: h.is529, sortedBy: 'Your history' };
+
+  var kw = keywordVerdict(text);
+  if (kw) return { category: kw[0], is529: kw[1], sortedBy: 'Store name' };
+
+  var m = PFC_MAP[det] || PFC_PRIMARY_MAP[pr];
+  if (m && confident) {
+    if (m[0] === 'Food & Dining') {
+      var food = foodIs529(text);
+      if (food !== 'Not Sure') return { category: 'Food & Dining', is529: food, sortedBy: 'Store name' };
+    }
+    if (m[1] !== 'Not Sure') return { category: m[0], is529: m[1], sortedBy: 'Bank category' };
+  }
+
+  // Store-name food rules, but not for "sells everything" stores: on a
+  // receipt "Walmart" usually means groceries, on a card charge it could be
+  // a TV. Those wait for your history or for you.
+  var food2 = foodIs529(text);
+  if (food2 !== 'Not Sure' && (!m || m[0] === 'Food & Dining')) {
+    return { category: 'Food & Dining', is529: food2, sortedBy: 'Store name' };
+  }
+
+  if (ai && ai.left > 0) {
+    ai.left--;
+    var g = aiClassify(place, det, t.amount);
+    if (g && g.is529 !== 'Not Sure') return { category: g.category, is529: g.is529, sortedBy: 'AI' };
+    if (g) return { category: g.category, is529: 'Not Sure', sortedBy: 'AI' };
+  }
+  return { category: m ? m[0] : 'Other', is529: 'Not Sure', sortedBy: m ? 'Bank category' : '' };
+}
+
+var CLASSIFY_PROMPT =
+'You sort one bank card charge for a US college student\'s 529 plan records. Return ONLY raw JSON, no markdown:\n' +
+'{"category":"Food & Dining","is529":"Yes","confident":true}\n' +
+'category is exactly one of: Food & Dining, Tuition & Fees, Books & Supplies, Housing, Transportation, Technology, Healthcare, Entertainment, Clothing, Personal Care, School Supplies, Other.\n' +
+'is529 follows IRS Qualified Higher Education Expense rules: "Yes" for tuition and required fees, required books/supplies/equipment, computers/software/internet, room and board (rent, utilities, groceries, meal plans). "No" for restaurants, travel, transportation, parking, medical, insurance, clothing, personal care, entertainment, phone plans.\n' +
+'If the store sells many kinds of things (Walmart, Target, Amazon, Costco, a department store) and the name does not say what was bought, use "Not Sure". Set confident to false whenever you are guessing.';
+
+function aiClassify(place, det, amount) {
+  var prompt = CLASSIFY_PROMPT + '\n\nStore: ' + place + '\nBank label: ' + (det || 'none') +
+               '\nAmount: $' + Math.abs(Number(amount) || 0).toFixed(2);
+  var models = [GEMINI_PRIMARY, GEMINI_FALLBACK];
+  for (var i = 0; i < models.length; i++) {
+    try {
+      var resp = UrlFetchApp.fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/' + models[i] +
+        ':generateContent?key=' + encodeURIComponent(geminiKey()),
+        { method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+          payload: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }],
+                                    generationConfig: { temperature: 0, maxOutputTokens: 80 } }) });
+      if (resp.getResponseCode() !== 200) continue;
+      var parts = ((((JSON.parse(resp.getContentText()).candidates || [])[0] || {}).content || {}).parts) || [];
+      var out = '';
+      for (var p = 0; p < parts.length; p++) if (!parts[p].thought && parts[p].text) out += parts[p].text;
+      var m = out.match(/\{[\s\S]*?\}/);
+      if (!m) continue;
+      var d = JSON.parse(m[0]);
+      var cat = CATEGORIES.indexOf(d.category) !== -1 ? d.category : 'Other';
+      var is = YES_NO_MAYBE.indexOf(d.is529) !== -1 ? d.is529 : 'Not Sure';
+      if (d.confident === false) is = 'Not Sure';
+      return { category: cat, is529: is };
+    } catch (e) { /* try the next model */ }
+  }
+  return null;
+}
+
+/** After you answer one charge, re-sort the others from that store still waiting. */
+function resortReviewRows(sh, merchants) {
+  var last = sh.getLastRow();
+  if (last < 2) return [];
+  var rows = sh.getRange(2, 1, last - 1, HEADERS.length).getValues();
+  var history = buildHistory(rows);
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (String(r[17]) !== 'Yes' || String(r[16]) === 'You') continue;
+    var key = merchantKey(r[1]);
+    if (!merchants[key]) continue;
+    var v = historyVote(history, key);
+    if (!v) continue;
+    var rowNum = i + 2;
+    sh.getRange(rowNum, 3).setValue(v.category);
+    sh.getRange(rowNum, 12).setValue(v.is529);
+    if (String(r[9]) !== 'Yes') sh.getRange(rowNum, 9).setValue(v.is529 === 'Yes' ? 'Yes' : 'No');
+    sh.getRange(rowNum, COL.sortedBy).setValue('Your history');
+    sh.getRange(rowNum, COL.review).setValue('');
+    out.push(toObject(sh.getRange(rowNum, 1, 1, HEADERS.length).getValues()[0], i));
+  }
+  return out;
+}
+
+function semesterOf(dateStr) {
+  var m = String(dateStr || '').match(/^(\d{4})-(\d{2})/);
+  if (!m) return '';
+  var mo = Number(m[2]);
+  return (mo <= 5 ? 'Spring ' : mo <= 8 ? 'Summer ' : 'Fall ') + m[1];
+}
+
+/* ===================================================================
+   AUTOMATIC BANK IMPORT (Plaid)
+
+   ONE-TIME SETUP — Script Properties:
+     PLAID_CLIENT_ID, PLAID_SECRET   from dashboard.plaid.com > Developers > Keys
+     PLAID_ENV                       "sandbox" to test with fake banks; leave
+                                     unset (production) for your real accounts
+   Then run setupBankSync() once from the editor (Run button) so Google asks
+   for permission to schedule the sync. After that it runs every 6 hours.
+
+   Each connected bank is kept in a Script Property named BANKITEM_<id>
+   (its Plaid access token and sync position). Nothing bank-related is ever
+   sent to the browser except names, last-4 digits and sync status.
+   =================================================================== */
+
+function plaidEnv() {
+  var e = String(PropertiesService.getScriptProperties().getProperty('PLAID_ENV') || '').toLowerCase();
+  return e === 'sandbox' ? 'sandbox' : 'production';
+}
+
+function plaidCall(path, body) {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty('PLAID_CLIENT_ID'), secret = props.getProperty('PLAID_SECRET');
+  if (!id || !secret) throw new Error('Plaid keys are not set. Add PLAID_CLIENT_ID and PLAID_SECRET in Script Properties.');
+  body.client_id = id;
+  body.secret = secret;
+  var resp = UrlFetchApp.fetch('https://' + plaidEnv() + '.plaid.com' + path, {
+    method: 'post', contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true
+  });
+  var data = {};
+  try { data = JSON.parse(resp.getContentText() || '{}'); } catch (e) { /* non-JSON error page */ }
+  if (resp.getResponseCode() !== 200) {
+    var err = new Error(data.error_message || data.display_message || ('Plaid returned HTTP ' + resp.getResponseCode()));
+    err.plaidCode = data.error_code || '';
+    throw err;
+  }
+  return data;
+}
+
+var ITEM_PREFIX = 'BANKITEM_';
+function getItem(id) {
+  var v = PropertiesService.getScriptProperties().getProperty(ITEM_PREFIX + id);
+  return v ? JSON.parse(v) : null;
+}
+function saveItem(it) {
+  PropertiesService.getScriptProperties().setProperty(ITEM_PREFIX + it.itemId, JSON.stringify(it));
+}
+function listItems() {
+  var all = PropertiesService.getScriptProperties().getProperties(), out = [];
+  for (var k in all) if (k.indexOf(ITEM_PREFIX) === 0) { try { out.push(JSON.parse(all[k])); } catch (e) {} }
+  out.sort(function (a, b) { return String(a.institution).localeCompare(String(b.institution)); });
+  return out;
+}
+function publicItem(it) {
+  var accts = [];
+  for (var a in (it.accounts || {})) accts.push(it.accounts[a]);
+  return { itemId: it.itemId, institution: it.institution, accounts: accts,
+           lastSync: it.lastSync || '', error: it.error || '',
+           needsRelink: /ITEM_LOGIN_REQUIRED|PENDING_EXPIRATION|INVALID_CREDENTIALS|ACCESS_NOT_GRANTED/.test(it.error || '') };
+}
+
+function shortInstitution(name) {
+  var n = String(name || 'Bank');
+  if (/american express/i.test(n)) return 'Amex';
+  if (/^usaa/i.test(n)) return 'USAA';
+  if (/chase/i.test(n)) return 'Chase';
+  return n.replace(/\b(bank|financial|credit union|n\.?a\.?)\b/gi, '').replace(/\s{2,}/g, ' ').trim().slice(0, 20) || n.slice(0, 20);
+}
+
+function accountLabels(accessToken, institution) {
+  var res = plaidCall('/accounts/get', { access_token: accessToken });
+  var out = {}, inst = shortInstitution(institution);
+  (res.accounts || []).forEach(function (a) {
+    out[a.account_id] = inst + (a.mask ? ' •' + a.mask : ' ' + (a.name || ''));
+  });
+  return out;
+}
+
+function bankStatus() {
+  var props = PropertiesService.getScriptProperties();
+  var scheduled = null;
+  try {
+    scheduled = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'syncAllBanks'; });
+  } catch (e) { scheduled = null; }                  // permission not granted yet
+  return {
+    success: true,
+    configured: !!(props.getProperty('PLAID_CLIENT_ID') && props.getProperty('PLAID_SECRET')),
+    env: plaidEnv(),
+    scheduled: scheduled,
+    lastRun: props.getProperty('BANK_LAST_RUN') || '',
+    startDate: props.getProperty('BANK_START') || '',
+    banks: listItems().map(publicItem)
+  };
+}
+
+/** A short-lived token that opens Plaid's bank sign-in window. With an
+    itemId it opens "update mode" to fix an expired bank login. */
+function bankLinkToken(itemId) {
+  var body = { client_name: 'Dylan\'s Expenses', language: 'en', country_codes: ['US'],
+               user: { client_user_id: 'dylan' } };
+  if (itemId) {
+    var it = getItem(itemId);
+    if (!it) return { success: false, error: 'That bank isn\'t connected anymore' };
+    body.access_token = it.accessToken;
+  } else {
+    body.products = ['transactions'];
+    body.transactions = { days_requested: 730 };
+  }
+  return { success: true, linkToken: plaidCall('/link/token/create', body).link_token, env: plaidEnv() };
+}
+
+function bankExchange(publicToken, institution) {
+  if (!publicToken) return { success: false, error: 'Missing token from Plaid' };
+  var ex = plaidCall('/item/public_token/exchange', { public_token: String(publicToken) });
+  var it = getItem(ex.item_id) || { itemId: ex.item_id, cursor: '' };
+  it.accessToken = ex.access_token;
+  it.institution = String(institution || it.institution || 'Bank').slice(0, 40);
+  it.accounts = accountLabels(ex.access_token, it.institution);
+  it.error = '';
+  saveItem(it);
+
+  var props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('BANK_START')) {
+    // Import from the start of this month. Earlier spending is already in the
+    // Sheet from receipts, and this month's receipts get matched, not doubled.
+    var d = new Date();
+    props.setProperty('BANK_START', Utilities.formatDate(new Date(d.getFullYear(), d.getMonth(), 1), 'America/New_York', 'yyyy-MM-dd'));
+  }
+
+  var warning = '';
+  try { ensureSyncTriggers(true); }
+  catch (e) { warning = 'Automatic syncing needs one more step: run setupBankSync once in the Apps Script editor.'; }
+
+  var sync = syncItem(it);
+  return { success: true, bank: publicItem(getItem(it.itemId)), sync: sync, warning: warning };
+}
+
+function bankRemove(itemId) {
+  var it = getItem(itemId);
+  if (!it) return bankStatus();
+  try { plaidCall('/item/remove', { access_token: it.accessToken }); } catch (e) { /* already gone at Plaid */ }
+  PropertiesService.getScriptProperties().deleteProperty(ITEM_PREFIX + itemId);
+  return bankStatus();                                // rows already imported stay in the Sheet
+}
+
+/** Pull everything new for one bank since its last sync. */
+function syncItem(it) {
+  var added = [], modified = [], removed = [];
+  var start = it.cursor || '', cursor = start, hasMore = true, guard = 0, restarts = 0;
+  try {
+    while (hasMore && guard++ < 60) {
+      var body = { access_token: it.accessToken, count: 500 };
+      if (cursor) body.cursor = cursor;
+      var r;
+      try {
+        r = plaidCall('/transactions/sync', body);
+      } catch (e) {
+        if (e.plaidCode === 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION' && restarts++ < 3) {
+          cursor = start; added = []; modified = []; removed = []; hasMore = true;
+          continue;
+        }
+        throw e;
+      }
+      added = added.concat(r.added || []);
+      modified = modified.concat(r.modified || []);
+      removed = removed.concat(r.removed || []);
+      hasMore = !!r.has_more;
+      cursor = r.next_cursor;
+    }
+  } catch (err) {
+    it.error = err.plaidCode || String(err.message || err);
+    saveItem(it);
+    return { error: it.error, added: 0, linked: 0, updated: 0, removed: 0, review: 0 };
+  }
+  var res = applyBankChanges(it, added, modified, removed);
+  it.cursor = cursor;                                 // only after the rows are written
+  it.lastSync = new Date().toISOString();
+  it.error = '';
+  saveItem(it);
+  return res;
+}
+
+function syncAllBanks() {
+  var items = listItems();
+  var total = { success: true, banks: items.length, added: 0, linked: 0, updated: 0, removed: 0, review: 0, errors: [] };
+  for (var i = 0; i < items.length; i++) {
+    var r = syncItem(items[i]);
+    if (r.error) total.errors.push(items[i].institution + ': ' + r.error);
+    total.added += r.added; total.linked += r.linked; total.updated += r.updated;
+    total.removed += r.removed; total.review += r.review;
+  }
+  PropertiesService.getScriptProperties().setProperty('BANK_LAST_RUN', new Date().toISOString());
+  return total;
+}
+
+/** One-off run ten minutes after connecting a bank — Plaid needs a few
+    minutes to gather history the first time. Deletes its own trigger. */
+function syncBanksSoon() {
+  try { syncAllBanks(); } finally { deleteTriggers('syncBanksSoon'); }
+}
+
+function deleteTriggers(handler) {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === handler) ScriptApp.deleteTrigger(t);
+  });
+}
+
+function ensureSyncTriggers(soon) {
+  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'syncAllBanks'; });
+  if (!has) ScriptApp.newTrigger('syncAllBanks').timeBased().everyHours(6).create();
+  if (soon) {
+    deleteTriggers('syncBanksSoon');
+    ScriptApp.newTrigger('syncBanksSoon').timeBased().after(10 * 60 * 1000).create();
+  }
+}
+
+/** Run this once from the editor: it asks Google for permission to schedule
+    the sync, then turns on the every-6-hours run. */
+function setupBankSync() {
+  ensureSyncTriggers(false);
+  var s = bankStatus();
+  Logger.log('Bank sync scheduled: ' + s.scheduled + ' · banks connected: ' + s.banks.length + ' · Plaid: ' + s.env);
+  return s;
+}
+
+/** Write one sync's worth of changes into the Sheet. */
+function applyBankChanges(it, added, modified, removed) {
+  return withLock(function () {
+    var sh = getSheet();
+    var last = sh.getLastRow();
+    var rows = last > 1 ? sh.getRange(2, 1, last - 1, HEADERS.length).getValues() : [];
+    var startDate = PropertiesService.getScriptProperties().getProperty('BANK_START') || '0000-00-00';
+
+    var byTxn = {}, candidates = [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (r[13]) { byTxn[String(r[13])] = i; continue; }
+      if (String(r[6]) === 'Bank Transaction' || !r[1]) continue;
+      candidates.push({ i: i, amount: Number(r[4]) || 0, date: formatDate(r[3]), key: merchantKey(r[1]) });
+    }
+    var history = buildHistory(rows);
+    var ai = { left: 40 };
+    var res = { added: 0, linked: 0, updated: 0, removed: 0, review: 0 };
+    var newRows = [];
+
+    for (var a = 0; a < added.length; a++) {
+      var t = added[a];
+      if (t.pending || byTxn.hasOwnProperty(t.transaction_id)) continue;
+      var date = String(t.authorized_date || t.date || '').slice(0, 10);
+      if (!date || date < startDate) continue;
+      if (isNotSpending(t)) continue;
+
+      var place = bankPlace(t);
+      var amount = Math.round(Number(t.amount) * 100) / 100;
+      var account = (it.accounts || {})[t.account_id] || shortInstitution(it.institution);
+      var det = (t.personal_finance_category || {}).detailed || '';
+
+      // A receipt you already uploaded for this charge: attach the bank proof
+      // to it instead of adding the purchase twice.
+      var m = matchReceipt(candidates, place, amount, date);
+      if (m) {
+        var rowNum = m.i + 2;
+        sh.getRange(rowNum, COL.txn).setValue(t.transaction_id);
+        sh.getRange(rowNum, COL.account).setValue(account);
+        sh.getRange(rowNum, COL.bankCat).setValue(det);
+        candidates.splice(candidates.indexOf(m), 1);
+        byTxn[t.transaction_id] = m.i;
+        res.linked++;
+        continue;
+      }
+
+      var c = classifyCharge(t, history, ai);
+      var review = c.is529 === 'Not Sure' ? 'Yes' : '';
+      newRows.push(toRow({
+        id: 'b' + String(t.transaction_id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 38),
+        timestamp: new Date().toISOString(), place: place, category: c.category, date: date,
+        amount: amount, semester: semesterOf(date), receiptType: 'Bank Transaction', receiptUrl: '',
+        needsReimb: c.is529 === 'Yes' ? 'Yes' : 'No', reimbursed: 'No',
+        notes: c.notes || (amount < 0 ? 'Refund' : ''), is529: c.is529,
+        bankTxnId: t.transaction_id, account: account, bankCategory: det,
+        sortedBy: c.sortedBy, review: review
+      }));
+      byTxn[t.transaction_id] = -1;
+      if (review) res.review++;
+    }
+    if (newRows.length) {
+      sh.getRange(sh.getLastRow() + 1, 1, newRows.length, HEADERS.length).setValues(newRows);
+      res.added = newRows.length;
+    }
+
+    // Amount or date changed at the bank (e.g. a tip posted): follow it,
+    // unless you've edited that row yourself.
+    if (modified.length) {
+      var idx = txnIndex(sh);
+      for (var mo = 0; mo < modified.length; mo++) {
+        var tm = modified[mo], rn = idx[tm.transaction_id];
+        if (!rn) continue;
+        if (String(sh.getRange(rn, COL.sortedBy).getValue()) === 'You') continue;
+        if (String(sh.getRange(rn, 7).getValue()) !== 'Bank Transaction') continue;
+        sh.getRange(rn, 5).setValue(Math.round(Number(tm.amount) * 100) / 100);
+        var md = String(tm.authorized_date || tm.date || '').slice(0, 10);
+        if (md) { sh.getRange(rn, 4).setValue(md); sh.getRange(rn, 6).setValue(semesterOf(md)); }
+        res.updated++;
+      }
+    }
+
+    // Charges the bank dropped (usually a reversed hold): move to Deleted
+    if (removed.length) {
+      var idx2 = txnIndex(sh), gone = [];
+      for (var rm = 0; rm < removed.length; rm++) {
+        var rn2 = idx2[removed[rm].transaction_id];
+        if (rn2 && String(sh.getRange(rn2, 7).getValue()) === 'Bank Transaction') gone.push(rn2);
+      }
+      gone.sort(function (x, y) { return y - x; });
+      if (gone.length) {
+        var ss = SpreadsheetApp.openById(SHEET_ID);
+        var bin = ss.getSheetByName(DELETED_TAB) || ss.insertSheet(DELETED_TAB);
+        if (bin.getLastRow() === 0) bin.appendRow(HEADERS.concat(['Deleted At']));
+        for (var g = 0; g < gone.length; g++) {
+          bin.appendRow(sh.getRange(gone[g], 1, 1, HEADERS.length).getValues()[0].concat([new Date()]));
+          sh.deleteRow(gone[g]);
+          res.removed++;
+        }
+      }
+    }
+    return res;
+  });
+}
+
+/** A bank-imported charge with no receipt yet that this receipt is for. */
+function matchBankRow(sh, place, amount, date) {
+  var last = sh.getLastRow();
+  if (last < 2 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return -1;
+  var rows = sh.getRange(2, 1, last - 1, HEADERS.length).getValues();
+  var cands = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (String(r[6]) !== 'Bank Transaction' || r[7]) continue;
+    cands.push({ i: i, amount: Number(r[4]) || 0, date: formatDate(r[3]), key: merchantKey(r[1]) });
+  }
+  // Same scoring as matchReceipt, seen from the receipt's side: the bank
+  // amount may be higher than the receipt (tip), never lower.
+  var key = merchantKey(place), best = null, bestScore = 0;
+  var d0 = new Date(date + 'T12:00:00').getTime();
+  for (var c = 0; c < cands.length; c++) {
+    var k = cands[c];
+    var days = Math.abs(new Date(k.date + 'T12:00:00').getTime() - d0) / 86400000;
+    var same = key && k.key === key, score = 0;
+    if (Math.abs(k.amount - amount) < 0.01 && days <= 4) score = same ? 3 : 2;
+    else if (same && days <= 3 && k.amount >= amount && k.amount <= amount * 1.35) score = 1;
+    if (score > bestScore) { best = k; bestScore = score; }
+  }
+  return best ? best.i + 2 : -1;
+}
+
+function txnIndex(sh) {
+  var last = sh.getLastRow(), out = {};
+  if (last < 2) return out;
+  var v = sh.getRange(2, COL.txn, last - 1, 1).getValues();
+  for (var i = 0; i < v.length; i++) if (v[i][0]) out[String(v[i][0])] = i + 2;
+  return out;
+}
+
+/** An uploaded receipt that is this bank charge: same amount within 4 days,
+    or the same store within 3 days with the bank amount up to 35% higher
+    (a restaurant receipt photographed before the tip). */
+function matchReceipt(candidates, place, amount, date) {
+  var key = merchantKey(place), best = null, bestScore = 0;
+  var d0 = new Date(date + 'T12:00:00').getTime();
+  for (var i = 0; i < candidates.length; i++) {
+    var c = candidates[i];
+    if (!c.date) continue;
+    var days = Math.abs(new Date(c.date + 'T12:00:00').getTime() - d0) / 86400000;
+    var sameStore = key && c.key === key;
+    var score = 0;
+    if (Math.abs(c.amount - amount) < 0.01 && days <= 4) score = sameStore ? 3 : 2;
+    else if (sameStore && days <= 3 && amount >= c.amount && amount <= c.amount * 1.35) score = 1;
+    if (score > bestScore) { best = c; bestScore = score; }
+  }
+  return best;
 }
 
 /** Pad a row out to the full HEADERS width (the recovery tools build 12). */
@@ -742,7 +1496,7 @@ function applyFormatting(sh) {
   sh.setRowHeight(1, 42);
 
   // Column widths, in HEADERS order
-  var widths = [150, 190, 150, 100, 95, 115, 130, 210, 150, 150, 240, 130, 120];
+  var widths = [150, 190, 150, 100, 95, 115, 130, 210, 150, 150, 240, 130, 120, 150, 120, 200, 110, 100];
   for (var i = 0; i < widths.length; i++) sh.setColumnWidth(i + 1, widths[i]);
 
   // Number and date formats

@@ -611,6 +611,45 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 .text-btn{background:none;border:none;color:var(--text3);font-size:12.5px;font-weight:500;cursor:pointer;text-decoration:underline;text-underline-offset:2px;font-family:inherit;padding:4px;}
 .text-btn:hover{color:var(--red-text);}
 
+/* Needs a look + bank accounts */
+.card-note{font-size:13px;color:var(--text2);line-height:1.5;margin:-6px 0 14px;}
+.review-card{border-color:rgba(196,122,56,0.30);}
+.review-card .chart-title::before{background:linear-gradient(var(--orange),#A8621E);}
+.review-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px;padding:13px 0;border-bottom:1px solid var(--border);}
+.review-row:last-child{border-bottom:none;}
+.review-row .reimb-info{cursor:pointer;}
+.review-actions{display:flex;gap:8px;align-items:center;width:100%;}
+.mini-select{flex:1;min-width:0;padding:9px 30px 9px 12px;border:1px solid var(--border2);border-radius:11px;background-color:var(--surface);color:var(--text);font-size:14px;font-family:inherit;-webkit-appearance:none;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23695236' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M3 6l5 5 5-5'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 11px center;}
+.answer-btn{flex-shrink:0;padding:9px 14px;border-radius:11px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;border:1px solid var(--border2);background:var(--surface);color:var(--text2);
+  transition:background var(--dur-1) var(--ease),border-color var(--dur-1) var(--ease),color var(--dur-1) var(--ease);}
+.answer-btn.yes{color:var(--green);border-color:rgba(58,102,68,0.35);}
+.answer-btn.yes:hover{background:var(--green-dim);border-color:var(--green);}
+.answer-btn.no{color:var(--red-text);border-color:rgba(168,56,48,0.28);}
+.answer-btn.no:hover{background:var(--red-bg);border-color:var(--red);}
+.answer-btn:disabled{opacity:0.5;cursor:default;}
+.bank-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);}
+.bank-row:last-of-type{border-bottom:none;}
+.bank-icon{width:36px;height:36px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.bank-icon i{font-size:16px;color:var(--text2);}
+.bank-row.bad .bank-icon{background:var(--orange-bg);border-color:rgba(196,122,56,0.25);}
+.bank-row.bad .bank-icon i{color:var(--orange-text);}
+.bank-status{font-size:12px;color:var(--text3);margin-top:3px;}
+.bank-row.bad .bank-status{color:var(--orange-text);font-weight:500;}
+.bank-actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;}
+.bank-actions .export-btn{flex:none;padding:10px 16px;}
+.bank-note{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--orange-text);background:var(--orange-bg);border-radius:10px;padding:10px 12px;margin-top:12px;line-height:1.45;}
+.env-tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:var(--blue-bg);color:var(--blue-text);letter-spacing:0;}
+.tag-bank{background:var(--surface2);color:var(--text2);border:1px solid var(--border);}
+.tag-review{background:var(--orange-bg);color:var(--orange-text);font-weight:600;}
+.edit-source{font-size:12.5px;color:var(--text2);background:var(--surface2);border-radius:var(--radius-sm);padding:10px 12px;line-height:1.55;}
+.edit-source strong{color:var(--text);font-weight:600;}
+@media(min-width:768px){
+  .review-row{flex-wrap:nowrap;}
+  .review-actions{width:auto;}
+  .mini-select{flex:none;width:170px;}
+}
+
 /* Read-only page for Dad (?reimb=…) — the app shell never renders */
 .share-view{display:none;position:relative;z-index:1;}
 body.share-mode .share-view{display:block;}
@@ -897,6 +936,12 @@ body.share-mode .app,body.share-mode .lock-screen,body.share-mode .top-progress{
     <h2 class="page-title" id="dashGreeting">Welcome back.</h2>
     <p class="page-sub" id="dashSub">Loading your expenses…</p>
   </div>
+  <!-- NEEDS A LOOK — bank charges the sorter couldn't decide -->
+  <div class="chart-card review-card" id="reviewCard" hidden>
+    <div class="chart-title">Needs a look <span class="title-meta" id="reviewCount"></span></div>
+    <p class="card-note">The app couldn’t tell whether these count for your 529. Your answer also teaches it: future charges from the same store sort themselves.</p>
+    <div id="reviewList"></div>
+  </div>
   <div class="sync-info">
     <h3><i class="bi bi-google"></i> Google Integration
       <button onclick="refreshFromSheets()" id="refreshBtn" style="margin-left:auto;background:var(--green-dim);border:1px solid var(--border2);color:var(--green);border-radius:20px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer">↻ Refresh</button>
@@ -907,6 +952,13 @@ body.share-mode .app,body.share-mode .lock-screen,body.share-mode .top-progress{
     <div class="sync-row warn" id="backendRow" hidden><i class="bi bi-exclamation-triangle-fill"></i><span>Your Apps Script is the old version. Editing, budgets and sharing turn on once it's updated.</span></div>
     <div class="sync-row" id="installRow" hidden><i class="bi bi-phone" style="color:var(--orange)"></i><span id="installText">Install as an app</span><button class="row-btn" id="installBtn" hidden onclick="installApp()">Install</button></div>
     <div class="sync-row" id="lockRow" hidden><i class="bi bi-shield-lock" style="color:var(--green)"></i><span>Passcode on</span><button class="row-btn" onclick="lockDevice()">Lock this device</button></div>
+  </div>
+  <!-- BANK ACCOUNTS — automatic import through Plaid -->
+  <div class="chart-card" id="bankCard" hidden>
+    <div class="chart-title">Bank accounts <span class="title-meta" id="bankMeta"></span>
+      <button class="mini-btn" id="bankSyncBtn" onclick="syncBanksNow()" hidden><i class="bi bi-arrow-repeat"></i> Sync now</button>
+    </div>
+    <div id="bankBody"></div>
   </div>
   <div class="metric-grid">
     <div class="metric"><div class="ml">Total Spent</div><div class="mv green" id="mTotal">$0</div><div class="ms" id="mCount">0 expenses</div></div>
@@ -1033,6 +1085,8 @@ body.share-mode .app,body.share-mode .lock-screen,body.share-mode .top-progress{
     <div class="chip" onclick="setFilter('529',this)">529 Only</div>
     <div class="chip" onclick="setFilter('non529',this)">Non-529</div>
     <div class="chip" onclick="setFilter('reimb',this)">Needs Reimb.</div>
+    <div class="chip" onclick="setFilter('review',this)">Needs a look</div>
+    <div class="chip" onclick="setFilter('bank',this)">From bank</div>
   </div>
   <div class="exp-list" id="expList">
     <div class="empty-state"><i class="bi bi-receipt-x"></i><p>No expenses yet.<br>Upload receipts to get started.</p></div>
@@ -1255,6 +1309,7 @@ async function unlock(ev){
   btn.disabled=false; btn.innerHTML='<i class="bi bi-unlock-fill"></i> Unlock';
   if(ok){
     input.value='';
+    bankState=null;
     updateBadge(); updateSyncStatus(); renderActiveTab();
     toast('✓ Unlocked');
   } else if(!isLocked()){
@@ -1267,7 +1322,7 @@ async function unlock(ev){
 // Forget the passcode and every cached expense on this device
 function lockDevice(){
   ['exp_key','ucf_expenses_v2','exp_budgets','exp_share','last_sync'].forEach(store.del);
-  expenses=[]; budgets={};
+  expenses=[]; budgets={}; bankState=null;
   updateBadge(); renderActiveTab();
   showLock('');
 }
@@ -1735,7 +1790,10 @@ async function saveExpense(uid, quiet=false){
       receiptUrl: out.receiptUrl || (out.expense&&out.expense.receiptUrl) || '',
       savedToGoogle:true
     });
-    if(!expenses.some(e=>e.id===saved.id)) expenses.push(saved);
+    // A receipt for a charge the bank already imported is attached to that
+    // row by the backend, so replace it here instead of adding a second one
+    const at=expenses.findIndex(e=>e.id===saved.id);
+    if(at>=0) expenses[at]=saved; else expenses.push(saved);
     persistExpenses();
     updateBadge();
     store.set('last_sync',new Date().toISOString());
@@ -1744,7 +1802,7 @@ async function saveExpense(uid, quiet=false){
     statusEl.innerHTML='<i class="bi bi-cloud-check-fill"></i> Saved to Google';
     const imgFailed=String(saved.receiptUrl).startsWith('UPLOAD_FAILED');
     if(imgFailed) toast('Saved, but the receipt photo didn’t upload to Drive',true);
-    else if(!quiet) toast(out.duplicate?'✓ Already saved':'✓ Saved to Google Sheets + Drive');
+    else if(!quiet) toast(out.merged?`✓ Receipt attached to the ${saved.account||'bank'} charge`:out.duplicate?'✓ Already saved':'✓ Saved to Google Sheets + Drive');
     await sleep(900);
     item.remove();
     updateSubmitAllBtn();
@@ -1785,6 +1843,8 @@ function renderGreeting(){
 // ─── CHARTS ───
 function renderCharts(){
   renderGreeting();
+  renderReview();
+  renderBanks();
   renderBudgets();
   renderBreakdown();
   const cats={},byDate={};
@@ -1831,6 +1891,8 @@ function renderList(){
   if(activeFilter==='529')data=data.filter(e=>e.is529==='Yes');
   if(activeFilter==='non529')data=data.filter(e=>e.is529==='No');
   if(activeFilter==='reimb')data=data.filter(e=>e.needsReimb==='Yes'&&e.reimbursed!=='Yes');
+  if(activeFilter==='review')data=data.filter(e=>e.review==='Yes');
+  if(activeFilter==='bank')data=data.filter(e=>!!e.bankTxnId);
   const list=document.getElementById('expList');
   if(!data.length){list.innerHTML=`<div class="empty-state"><i class="bi bi-receipt-x"></i><p>No expenses${activeFilter!=='all'?' matching this filter':' yet'}.</p></div>`;return;}
   const catKeys=Object.keys(CAT_ICONS);
@@ -1841,7 +1903,10 @@ function renderList(){
     const tag529=e.is529==='Yes'?'<span class="tag tag-529">529 ✓</span>':e.is529==='No'?'<span class="tag tag-non529">Non-529</span>':'<span class="tag tag-unsure">529?</span>';
     const tagReimb=(e.needsReimb==='Yes'&&e.reimbursed!=='Yes')?'<span class="tag tag-reimb">Reimb. pending</span>':'';
     const tagSem=e.semester?`<span class="tag tag-sem">${e.semester}</span>`:'';
-    const tagGoogle=e.savedToGoogle?'<span class="tag tag-gdrive"><i class="bi bi-cloud-check-fill" style="font-size:11px"></i> Google</span>':'';
+    const tagGoogle=e.bankTxnId
+      ?`<span class="tag tag-bank"><i class="bi bi-bank" style="font-size:10px"></i> ${esc(e.account||'Bank')}</span>`
+      :(e.savedToGoogle?'<span class="tag tag-gdrive"><i class="bi bi-cloud-check-fill" style="font-size:11px"></i> Google</span>':'');
+    const tagReview=e.review==='Yes'?'<span class="tag tag-review">Needs a look</span>':'';
     const viewBtn=e.receiptUrl?`<button class="view-receipt-btn" onclick="openReceiptModal('${e.id}')"><i class="bi bi-zoom-in"></i> View Receipt in Drive</button>`:'';
     return `<div class="exp-card">
       <div class="exp-card-top" onclick="openEdit('${e.id}')">
@@ -1851,7 +1916,7 @@ function renderList(){
           <div class="exp-name">${esc(e.place)}</div>
           <div class="exp-meta">${e.category} · ${dateStr}</div>
           ${e.notes?`<div class="exp-meta" style="font-style:italic">${esc(e.notes)}</div>`:''}
-          <div class="exp-tags">${tag529}${tagReimb}${tagSem}${tagGoogle}</div>
+          <div class="exp-tags">${tagReview}${tag529}${tagReimb}${tagSem}${tagGoogle}</div>
         </div>
         <div class="exp-right">
           <div class="exp-amt">${money(e.amount)}</div>
@@ -1876,7 +1941,9 @@ function renderTable(){
     const dateStr=e.date?new Date(e.date+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}):'—';
     const cls529=e.is529==='Yes'?'td-529-yes':e.is529==='No'?'td-529-no':'';
     const driveCell=e.receiptUrl?`<a class="drive-link" href="${e.receiptUrl}" target="_blank"><i class="bi bi-image"></i> View</a>`:`<span style="color:var(--text3);font-size:12px">—</span>`;
-    const syncIcon=e.savedToGoogle?'<i class="bi bi-cloud-check-fill" style="color:var(--green);font-size:14px" title="Saved to Google"></i>':'<i class="bi bi-floppy" style="color:var(--text3);font-size:14px" title="Local only"></i>';
+    const syncIcon=e.review==='Yes'?'<i class="bi bi-question-circle-fill" style="color:var(--orange);font-size:14px" title="Needs a look"></i>'
+      :e.bankTxnId?`<i class="bi bi-bank" style="color:var(--text2);font-size:14px" title="From ${esc(e.account||'bank')}"></i>`
+      :e.savedToGoogle?'<i class="bi bi-cloud-check-fill" style="color:var(--green);font-size:14px" title="Saved to Google"></i>':'<i class="bi bi-floppy" style="color:var(--text3);font-size:14px" title="Local only"></i>';
     return `<tr>
       <td>${syncIcon}</td>
       <td>${dateStr}</td>
@@ -1946,7 +2013,7 @@ function openEdit(id){
     <div class="field"><label>529 Eligible?</label>${pillRow('ed-529',['Yes','No','Not Sure'],e.is529||'Not Sure')}</div>
     <div class="field"><label>Place / Vendor</label><input type="text" id="ed-place" value="${esc(e.place)}"></div>
     <div class="field-row">
-      <div class="field"><label>Amount ($)</label><input type="number" step="0.01" min="0" inputmode="decimal" id="ed-amt" value="${e.amount}"></div>
+      <div class="field"><label>Amount ($)</label><input type="number" step="0.01" inputmode="decimal" id="ed-amt" value="${e.amount}"></div>
       <div class="field"><label>Date</label><input type="date" id="ed-date" value="${esc(e.date)}" onchange="syncSemester('ed-date','ed-sem')"></div>
     </div>
     <div class="field"><label>Category</label><select id="ed-cat">${cats.map(c=>`<option value="${c}"${c===e.category?' selected':''}>${c}</option>`).join('')}</select></div>
@@ -1957,6 +2024,7 @@ function openEdit(id){
       <div class="field"><label>Reimbursed?</label>${pillRow('ed-paid',['Yes','No'],e.reimbursed==='Yes'?'Yes':'No')}</div>
     </div>
     ${hasReceipt?`<div class="edit-receipt"><i class="bi bi-image"></i> Receipt in Drive<a href="${esc(e.receiptUrl)}" target="_blank" rel="noopener">Open →</a></div>`:''}
+    ${e.bankTxnId?`<div class="edit-source"><strong>From ${esc(e.account||'your bank')}</strong>${e.bankCategory?` · bank says “${esc(humanPfc(e.bankCategory))}”`:''}${e.sortedBy?`<br>529 decided by: <strong>${esc(e.sortedBy)}</strong>`:''}${!hasReceipt?'<br>Tip: upload a photo of the receipt and it attaches here.':''}</div>`:''}
     <button class="save-btn" id="ed-save" onclick="saveEdit()"><i class="bi bi-check2"></i> Save changes</button>
     <button class="danger-btn" id="ed-del" onclick="deleteFromEdit()"><i class="bi bi-trash"></i> Delete expense</button>`;
   document.getElementById('editModal').classList.add('open');
@@ -1970,7 +2038,7 @@ async function saveEdit(){
   if(!e) return closeEdit();
   const v=id=>document.getElementById(id).value;
   const amt=parseFloat(v('ed-amt'));
-  if(isNaN(amt)||amt<0){ toast('Enter an amount of $0 or more',true); return; }
+  if(isNaN(amt)){ toast('Enter an amount (negative for a refund)',true); return; }
   if(!/^\d{4}-\d{2}-\d{2}$/.test(v('ed-date'))){ toast('Pick a date',true); return; }
   const next={ place:v('ed-place').trim()||'Unknown', amount:Math.round(amt*100)/100, date:v('ed-date'),
     category:v('ed-cat'), semester:v('ed-sem'), notes:v('ed-notes').trim(),
@@ -2239,6 +2307,183 @@ async function saveBudgetEditor(){
     btn.disabled=false; btn.innerHTML='<i class="bi bi-check2"></i> Save budgets';
     if(!(err instanceof LockedError)) toast('Not saved — '+errMsg(err),true);
   }
+}
+
+// ─── NEEDS A LOOK ───
+// Bank charges the sorter couldn't decide. One tap answers it, and the
+// backend re-sorts any other waiting charges from the same store.
+const PFC_PRIMARIES=['GENERAL_MERCHANDISE','GENERAL_SERVICES','FOOD_AND_DRINK','RENT_AND_UTILITIES','LOAN_PAYMENTS','TRANSFER_OUT','TRANSFER_IN','PERSONAL_CARE','HOME_IMPROVEMENT','GOVERNMENT_AND_NON_PROFIT','BANK_FEES','ENTERTAINMENT','TRANSPORTATION','TRAVEL','MEDICAL','INCOME'];
+function humanPfc(det){
+  let s=String(det||'');
+  const p=PFC_PRIMARIES.find(x=>s.startsWith(x+'_'));
+  if(p) s=s.slice(p.length+1);
+  s=s.replace(/_/g,' ').toLowerCase().replace(/\band\b/g,'&');
+  return s.charAt(0).toUpperCase()+s.slice(1);
+}
+function renderReview(){
+  const card=document.getElementById('reviewCard');
+  if(!card) return;
+  const list=expenses.filter(e=>e.review==='Yes').sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  card.hidden=!list.length;
+  if(!list.length) return;
+  document.getElementById('reviewCount').textContent='· '+list.length;
+  const cats=Object.keys(CAT_ICONS);
+  document.getElementById('reviewList').innerHTML=list.slice(0,12).map(e=>{
+    const meta=[shortDate(e.date,false),e.account,e.bankCategory?humanPfc(e.bankCategory):'',e.notes].filter(Boolean).map(esc).join(' · ');
+    return `<div class="review-row" id="rv-${e.id}">
+      <div class="reimb-info" onclick="openEdit('${e.id}')"><div class="reimb-name">${esc(e.place)}</div><div class="reimb-meta">${meta}</div></div>
+      <div class="reimb-amt">${money(e.amount)}</div>
+      <div class="review-actions">
+        <select class="mini-select" id="rvc-${e.id}" aria-label="Category">${cats.map(c=>`<option value="${c}"${c===e.category?' selected':''}>${c}</option>`).join('')}</select>
+        <button class="answer-btn yes" onclick="answerReview('${e.id}','Yes')">529</button>
+        <button class="answer-btn no" onclick="answerReview('${e.id}','No')">Not 529</button>
+      </div>
+    </div>`;
+  }).join('')+(list.length>12?`<p class="card-note" style="margin:10px 0 0">+ ${list.length-12} more in Cards → Needs a look</p>`:'');
+}
+async function answerReview(id,is529){
+  if(!requireWrite()) return;
+  const e=expenses.find(x=>x.id===id); if(!e) return;
+  const row=document.getElementById('rv-'+id);
+  row?.querySelectorAll('button,select').forEach(b=>b.disabled=true);
+  const category=document.getElementById('rvc-'+id)?.value||e.category;
+  try{
+    const out=await api('update',{id,changes:{is529,category,needsReimb:is529==='Yes'?'Yes':'No'}});
+    applyUpdates(out.updated);
+    renderReview(); renderGreeting();
+    toast(out.resorted?`✓ Saved — and sorted ${out.resorted} more from ${e.place}`:`✓ Saved — future ${e.place} charges will follow this`);
+  }catch(err){
+    row?.querySelectorAll('button,select').forEach(b=>b.disabled=false);
+    if(!(err instanceof LockedError)) toast('Not saved — '+errMsg(err),true);
+  }
+}
+
+// ─── BANK ACCOUNTS (Plaid) ───
+let bankState=null, bankLoading=false;
+function timeAgo(iso){
+  if(!iso) return 'not synced yet';
+  const m=Math.round((Date.now()-new Date(iso).getTime())/60000);
+  if(m<1) return 'synced just now';
+  if(m<60) return `synced ${m} min ago`;
+  const h=Math.round(m/60);
+  if(h<24) return `synced ${h} hr ago`;
+  return 'synced '+new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+}
+async function refreshBanks(){
+  if(!canWrite()||bankLoading) return;
+  bankLoading=true;
+  try{ bankState=await api('bankStatus'); }
+  catch(e){ bankState={error:errMsg(e)}; }      // never null here, or renderBanks would re-ask forever
+  finally{ bankLoading=false; }
+  renderBanks();
+}
+function renderBanks(){
+  const card=document.getElementById('bankCard');
+  if(!card) return;
+  card.hidden=!canWrite();
+  if(!canWrite()) return;
+  if(!bankState){ document.getElementById('bankBody').innerHTML='<p class="card-note" style="margin:0">Checking…</p>'; refreshBanks(); return; }
+  const s=bankState, body=document.getElementById('bankBody');
+  const syncBtn=document.getElementById('bankSyncBtn');
+  document.getElementById('bankMeta').innerHTML=s.env==='sandbox'?'<span class="env-tag">Test mode</span>':'';
+  syncBtn.hidden=!(s.banks&&s.banks.length);
+  if(s.error){ body.innerHTML=`<p class="card-note" style="margin:0">Couldn’t check your banks: ${esc(s.error)}</p>`; return; }
+  if(!s.configured){
+    body.innerHTML=`<p class="card-note" style="margin:0">Connect your cards and checking so every purchase lands here on its own and gets sorted for your 529. It needs your Plaid keys in Apps Script first.</p>`;
+    return;
+  }
+  const rows=(s.banks||[]).map(b=>{
+    const bad=!!b.error;
+    const status=b.needsRelink?'Login expired. Reconnect to keep importing.':bad?'Last sync failed: '+b.error:timeAgo(b.lastSync);
+    return `<div class="bank-row${bad?' bad':''}">
+      <span class="bank-icon"><i class="bi ${bad?'bi-exclamation-triangle-fill':'bi-bank'}"></i></span>
+      <div class="reimb-info"><div class="reimb-name">${esc(b.institution)}</div><div class="bank-status">${esc((b.accounts||[]).join(', '))}${b.accounts&&b.accounts.length?' · ':''}${esc(status)}</div></div>
+      ${b.needsRelink?`<button class="row-btn" onclick="connectBank('${esc(b.itemId)}')">Reconnect</button>`:''}
+      <button class="text-btn" id="rm-${esc(b.itemId)}" onclick="removeBank('${esc(b.itemId)}')">Remove</button>
+    </div>`;
+  }).join('');
+  const notes=[];
+  if(s.banks&&s.banks.length&&s.scheduled===null) notes.push('Automatic syncing needs one permission: in Apps Script, run <strong>setupBankSync</strong> once. Until then, use Sync now.');
+  else if(s.banks&&s.banks.length&&s.scheduled===false) notes.push('Automatic syncing is off. Run <strong>setupBankSync</strong> once in Apps Script to turn it on.');
+  body.innerHTML=(rows||'<p class="card-note" style="margin:0">Connect your cards and checking so every purchase lands here on its own and gets sorted for your 529. Transfers, card payments and paychecks are skipped.</p>')
+    +notes.map(n=>`<div class="bank-note"><i class="bi bi-info-circle"></i><span>${n}</span></div>`).join('')
+    +`<div class="bank-actions"><button class="export-btn" onclick="connectBank()"><i class="bi bi-plus-lg"></i> ${rows?'Connect another bank':'Connect a bank'}</button></div>`
+    +(s.startDate?`<p class="card-note" style="margin:12px 0 0">Importing purchases from ${shortDate(s.startDate)} on. Receipts you upload attach to the matching charge.</p>`:'');
+}
+
+let plaidScript=null;
+function loadPlaid(){
+  if(window.Plaid) return Promise.resolve();
+  if(!plaidScript) plaidScript=new Promise((res,rej)=>{
+    const s=document.createElement('script');
+    s.src='https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+    s.onload=res;
+    s.onerror=()=>{ plaidScript=null; rej(new Error('Couldn’t load Plaid — check your connection')); };
+    document.head.appendChild(s);
+  });
+  return plaidScript;
+}
+function bankSummary(r){
+  if(!r) return '';
+  const parts=[];
+  if(r.added) parts.push(`${r.added} new`);
+  if(r.linked) parts.push(`${r.linked} matched to receipts`);
+  if(r.review) parts.push(`${r.review} need a look`);
+  return parts.length?parts.join(' · '):'Nothing new yet';
+}
+// itemId given = fix an expired login ("update mode")
+async function connectBank(itemId){
+  if(!requireWrite()) return;
+  try{
+    const [tok]=await Promise.all([api('bankLinkToken',itemId?{itemId}:{}),loadPlaid()]);
+    const handler=window.Plaid.create({
+      token:tok.linkToken,
+      onSuccess:async(publicToken,meta)=>{
+        if(itemId){ toast('Reconnected — syncing…'); await syncBanksNow(); return; }
+        toast('Connected — importing your purchases…');
+        progressStart();
+        try{
+          const out=await api('bankExchange',{publicToken,institution:(meta&&meta.institution&&meta.institution.name)||''},{timeout:300000});
+          bankState=null;
+          await loadExpenses();
+          renderActiveTab();
+          const r=out.sync||{};
+          toast(r.added||r.linked?`✓ ${out.bank.institution}: ${bankSummary(r)}`:`✓ ${out.bank.institution} connected. Its history shows up within about 10 minutes.`);
+          if(out.warning) setTimeout(()=>toast(out.warning,true),3200);
+        }catch(err){ if(!(err instanceof LockedError)) toast('Connected, but the import failed — '+errMsg(err),true); }
+        finally{ progressStop(); }
+      },
+      onExit:(err)=>{ if(err) toast('Bank connection stopped: '+(err.display_message||err.error_message||'try again'),true); }
+    });
+    handler.open();
+  }catch(e){ if(!(e instanceof LockedError)) toast(errMsg(e),true); }
+}
+async function syncBanksNow(){
+  if(!requireWrite()) return;
+  const btn=document.getElementById('bankSyncBtn');
+  btn.disabled=true; btn.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Syncing…';
+  progressStart();
+  try{
+    const r=await api('bankSync',{},{timeout:300000});
+    await loadExpenses();
+    bankState=null;
+    renderActiveTab();
+    if(r.errors&&r.errors.length) toast(r.errors[0],true); else toast('✓ '+bankSummary(r));
+  }catch(e){ if(!(e instanceof LockedError)) toast('Sync failed — '+errMsg(e),true); }
+  finally{ progressStop(); btn.disabled=false; btn.innerHTML='<i class="bi bi-arrow-repeat"></i> Sync now'; }
+}
+// Two taps; rows already imported stay in the Sheet
+let removeArm=null;
+async function removeBank(itemId){
+  const btn=document.getElementById('rm-'+itemId);
+  if(removeArm!==itemId){
+    removeArm=itemId; btn.textContent='Tap again to remove';
+    setTimeout(()=>{ if(removeArm===itemId){ removeArm=null; renderBanks(); } },4000);
+    return;
+  }
+  removeArm=null;
+  try{ bankState=await api('bankRemove',{itemId}); renderBanks(); toast('Removed. Its past purchases stay in your Sheet.'); }
+  catch(e){ if(!(e instanceof LockedError)) toast(errMsg(e),true); }
 }
 
 // ─── INSTALL AS AN APP ───
