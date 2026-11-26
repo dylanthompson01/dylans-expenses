@@ -1,0 +1,16 @@
+{
+  "name": "Dylan's Expenses",
+  "short_name": "Expenses",
+  "description": "College expenses, 529 tracking, budgets and reimbursements",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F3ECDF",
+  "theme_color": "#F3ECDF",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

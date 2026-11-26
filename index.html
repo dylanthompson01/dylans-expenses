@@ -7,13 +7,22 @@
 <!-- Favicon: green $ on a tan rounded square, inlined as an SVG data URI so
      there is no second request and no file to keep alongside index.html. -->
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='15'%20fill='%23E8DCCC'/%3E%3Crect%20x='2.5'%20y='2.5'%20width='59'%20height='59'%20rx='13'%20fill='none'%20stroke='%233A6644'%20stroke-opacity='0.22'%20stroke-width='2'/%3E%3Ctext%20x='32'%20y='47'%20text-anchor='middle'%20font-family='Georgia,serif'%20font-size='44'%20font-weight='700'%20fill='%233A6644'%3E$%3C/text%3E%3C/svg%3E">
-<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='15'%20fill='%23E8DCCC'/%3E%3Ctext%20x='32'%20y='47'%20text-anchor='middle'%20font-family='Georgia,serif'%20font-size='44'%20font-weight='700'%20fill='%233A6644'%3E$%3C/text%3E%3C/svg%3E">
-<meta name="theme-color" content="#E8DCCC">
+<!-- Installable app: iOS needs a PNG touch icon (it ignores SVG), and the
+     manifest is what lets Chrome/Edge offer "Install" on desktop. -->
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#F3ECDF">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Expenses">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+/* `hidden` must win over any display rule (e.g. .sync-row is flex) */
+[hidden]{display:none!important;}
 :root{
   --bg:#E8DCCC;--surface:#FEFCF8;--surface2:#F4EADB;--surface3:#EAE0CE;
   --border:rgba(105,82,54,0.14);--border2:rgba(105,82,54,0.22);--border3:rgba(105,82,54,0.32);
@@ -488,6 +497,135 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 }
 
 /* ─────────────────────────────────────────
+   PASSCODE, EDITING, BUDGETS, REIMBURSEMENTS
+───────────────────────────────────────── */
+
+/* Small icon button (edit) — same footprint as the old trash button */
+.icon-btn{background:none;border:none;color:var(--text3);cursor:pointer;padding:6px;font-size:15px;display:block;margin-left:auto;margin-top:4px;border-radius:9px;opacity:0.7;-webkit-tap-highlight-color:transparent;
+  transition:color var(--dur-1) var(--ease),background var(--dur-1) var(--ease),opacity var(--dur-1) var(--ease),transform var(--dur-1) var(--ease);}
+.exp-card:hover .icon-btn,tr:hover .icon-btn{opacity:1;}
+.icon-btn:hover{color:var(--green);background:var(--green-dim);transform:scale(1.1);}
+.exp-card-top{cursor:pointer;}
+
+/* Row-end button inside the settings card */
+.row-btn{margin-left:auto;flex-shrink:0;padding:5px 12px;border-radius:20px;border:1px solid var(--border2);background:var(--surface);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;
+  transition:color var(--dur-1) var(--ease),border-color var(--dur-1) var(--ease),background var(--dur-1) var(--ease);}
+.row-btn:hover{color:var(--green);border-color:var(--green);background:var(--green-dim);}
+.sync-row.warn{color:var(--orange-text);}
+
+/* Lock screen — opaque, so nothing behind it is readable */
+.lock-screen{position:fixed;inset:0;z-index:500;display:flex;align-items:center;justify-content:center;padding:24px 16px;
+  background:linear-gradient(158deg,#F6EFE3 0%,#F1E9DB 46%,#EBE1D0 100%);}
+.lock-screen[hidden]{display:none;}
+.lock-card{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);padding:34px 26px 24px;text-align:center;
+  box-shadow:var(--sh-4),var(--sh-inset);display:flex;flex-direction:column;gap:14px;animation:modalIn 0.42s var(--ease-spring) both;}
+.lock-icon{width:64px;height:64px;border-radius:50%;background:var(--green-dim);display:flex;align-items:center;justify-content:center;margin:0 auto 2px;box-shadow:inset 0 0 0 1px rgba(58,102,68,0.12);}
+.lock-icon i{font-size:27px;color:var(--green);}
+.lock-title{font-size:22px;font-weight:800;letter-spacing:-0.03em;}
+.lock-sub{font-size:14px;color:var(--text2);line-height:1.5;}
+/* 17px keeps iOS from zooming in on focus */
+.lock-input{width:100%;padding:14px 16px;border:1px solid var(--border2);border-radius:12px;background:var(--surface);color:var(--text);font-size:17px;text-align:center;letter-spacing:0.08em;box-shadow:var(--sh-1);font-family:inherit;}
+.lock-input:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 3.5px rgba(58,102,68,0.13),var(--sh-2);}
+.lock-error{font-size:13px;font-weight:500;color:var(--red-text);}
+.lock-error:empty{display:none;}
+.lock-foot{font-size:12px;color:var(--text3);}
+
+/* Edit window */
+.danger-btn{width:100%;padding:12px;background:transparent;color:var(--red-text);border:1px solid rgba(168,56,48,0.28);border-radius:15px;font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;font-family:inherit;
+  transition:background var(--dur-2) var(--ease),color var(--dur-2) var(--ease);}
+.danger-btn:hover{background:var(--red-bg);}
+.danger-btn.armed{background:var(--red);color:#fff;border-color:var(--red);}
+.edit-receipt{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);}
+.edit-receipt a{margin-left:auto;color:var(--blue-text);font-weight:600;text-decoration:none;}
+.field textarea{width:100%;padding:12px 15px;border:1px solid var(--border2);border-radius:12px;background:var(--surface);color:var(--text);font-size:15px;font-family:inherit;resize:vertical;min-height:44px;}
+
+/* Budgets */
+.chart-title .title-meta{font-weight:500;color:var(--text3);font-size:13px;letter-spacing:0;}
+.mini-btn{margin-left:auto;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:20px;border:1px solid var(--border2);background:var(--surface);color:var(--green);font-size:12.5px;font-weight:600;cursor:pointer;box-shadow:var(--sh-1);font-family:inherit;letter-spacing:0;
+  transition:background var(--dur-2) var(--ease),border-color var(--dur-2) var(--ease);}
+.mini-btn:hover{background:var(--green-dim);border-color:var(--green);}
+.budget-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:7px 12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--border);}
+.budget-grid .budget-row:last-child{border-bottom:none;}
+.budget-row .bd-swatch{grid-row:1/3;}
+.budget-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.budget-nums{font-size:13px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.budget-nums small{display:block;font-size:11.5px;font-weight:500;color:var(--text3);margin-top:1px;}
+.budget-track{grid-column:2/4;position:relative;height:8px;border-radius:6px;background:var(--surface3);}
+.budget-fill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;background:var(--green);transition:width var(--dur-3) var(--ease);}
+.budget-row.warn .budget-fill{background:var(--orange);}
+.budget-row.warn .budget-nums small{color:var(--orange-text);}
+.budget-row.over .budget-fill{background:var(--red);}
+.budget-row.over .budget-nums small{color:var(--red-text);font-weight:600;}
+.budget-pace{position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;border-radius:1px;background:var(--text);opacity:0.35;}
+.budget-row.big{padding-top:4px;}
+.budget-row.big .budget-name{font-size:15px;}
+.budget-row.big .budget-nums{font-size:14.5px;}
+.budget-row.big .budget-track{height:11px;}
+.budget-foot{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--text3);margin-top:12px;}
+.budget-foot .pace-key{width:2px;height:12px;background:var(--text);opacity:0.35;border-radius:1px;flex-shrink:0;}
+.budget-empty{display:flex;flex-direction:column;align-items:flex-start;gap:12px;font-size:14px;color:var(--text2);line-height:1.5;}
+.budget-empty .export-btn{flex:none;padding:10px 18px;}
+.budget-edit-row{display:grid;grid-template-columns:auto minmax(0,1fr) 116px;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);}
+.budget-edit-row:last-child{border-bottom:none;}
+.be-name{font-size:14px;font-weight:600;}
+.be-hint{display:block;font-size:11.5px;color:var(--text3);font-weight:500;margin-top:2px;}
+.money-input{position:relative;}
+.money-input::before{content:'$';position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:15px;pointer-events:none;}
+.money-input input{width:100%;padding:10px 11px 10px 23px;border:1px solid var(--border2);border-radius:10px;background:var(--surface);color:var(--text);font-size:16px;text-align:right;font-variant-numeric:tabular-nums;font-family:inherit;}
+.money-input input:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 3px rgba(58,102,68,0.13);}
+.modal-note{font-size:13px;color:var(--text2);line-height:1.5;}
+
+/* Reimbursements */
+.narrow{max-width:820px;margin:0 auto;}
+.reimb-actions{display:flex;gap:10px;margin-bottom:16px;}
+.list-card{display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--sh-2),var(--sh-inset);overflow:hidden;}
+.reimb-row{display:flex;align-items:center;gap:12px;padding:13px 15px;border-bottom:1px solid var(--border);-webkit-tap-highlight-color:transparent;transition:background var(--dur-1) var(--ease);}
+.reimb-row:last-child{border-bottom:none;}
+.reimb-row.pick{cursor:pointer;}
+@media(hover:hover){.reimb-row.pick:hover{background:var(--surface2);}}
+.reimb-row.sel,.reimb-row.sel:hover{background:rgba(58,102,68,0.07);}
+.check{width:22px;height:22px;border-radius:7px;border:1.5px solid var(--border3);display:flex;align-items:center;justify-content:center;flex-shrink:0;background:var(--surface);
+  transition:background var(--dur-1) var(--ease),border-color var(--dur-1) var(--ease);}
+.check i{font-size:15px;color:#fff;opacity:0;}
+.reimb-row.sel .check{background:var(--green);border-color:var(--green);}
+.reimb-row.sel .check i{opacity:1;}
+.reimb-info{flex:1;min-width:0;}
+.reimb-name{font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:var(--tracking-tight);}
+.reimb-meta{font-size:12px;color:var(--text3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.reimb-amt{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;flex-shrink:0;}
+.reimb-receipt{color:var(--blue-text);font-size:17px;padding:6px;border-radius:8px;flex-shrink:0;line-height:1;}
+.reimb-receipt:hover{background:var(--blue-bg);}
+.reimb-receipt.none{color:var(--text3);opacity:0.35;pointer-events:none;}
+.section-label{font-size:12px;font-weight:600;color:var(--text3);margin:26px 0 10px;}
+.undo-btn{flex-shrink:0;padding:5px 11px;border-radius:16px;border:1px solid var(--border2);background:var(--surface);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;}
+.undo-btn:hover{color:var(--orange-text);border-color:var(--orange);}
+.select-bar{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:40;display:flex;align-items:center;gap:12px;
+  width:calc(100% - 32px);max-width:480px;padding:9px 9px 9px 18px;border-radius:22px;
+  background:rgba(26,22,16,0.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);color:#FEFCF8;font-size:13.5px;font-weight:600;
+  box-shadow:0 10px 32px rgba(38,28,16,0.34),inset 0 1px 0 rgba(255,255,255,0.10);animation:toastIn 0.35s var(--ease-spring);}
+.select-bar[hidden]{display:none;}
+.select-bar .save-btn{width:auto;padding:11px 16px;font-size:14px;margin-left:auto;flex-shrink:0;}
+.link-field{width:100%;padding:12px 14px;border:1px solid var(--border2);border-radius:12px;background:var(--surface2);color:var(--text);font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.btn-row{display:flex;gap:8px;}
+.btn-row > *{flex:1;}
+.text-btn{background:none;border:none;color:var(--text3);font-size:12.5px;font-weight:500;cursor:pointer;text-decoration:underline;text-underline-offset:2px;font-family:inherit;padding:4px;}
+.text-btn:hover{color:var(--red-text);}
+
+/* Read-only page for Dad (?reimb=…) — the app shell never renders */
+.share-view{display:none;position:relative;z-index:1;}
+body.share-mode .share-view{display:block;}
+body.share-mode .app,body.share-mode .lock-screen,body.share-mode .top-progress{display:none!important;}
+.share-wrap{max-width:680px;margin:0 auto;padding:44px 16px 64px;}
+.share-foot{font-size:12px;color:var(--text3);margin-top:16px;text-align:center;line-height:1.6;}
+
+@media(min-width:768px){
+  .budget-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:36px;}
+  .budget-grid .budget-row:nth-last-child(2):nth-child(odd){border-bottom:none;}
+  .reimb-row{padding:14px 18px;}
+  .share-wrap{padding-top:64px;}
+}
+
+/* ─────────────────────────────────────────
    DESKTOP LAYOUT — ≥ 768 px
 ───────────────────────────────────────── */
 @media(min-width:768px){
@@ -686,6 +824,35 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 </head>
 <body>
 <div class="top-progress" id="topProgress" aria-hidden="true"></div>
+
+<!-- PASSCODE — shown only when the backend refuses this device's passcode -->
+<div class="lock-screen" id="lockScreen" hidden>
+  <form class="lock-card" onsubmit="unlock(event)">
+    <div class="lock-icon"><i class="bi bi-shield-lock-fill"></i></div>
+    <h1 class="lock-title">Dylan's <span class="brand-accent">Expenses</span></h1>
+    <p class="lock-sub">Enter your passcode to open your expenses on this device.</p>
+    <!-- Lets iCloud Keychain / Chrome offer to save the passcode -->
+    <input type="text" name="username" value="Dylan's Expenses" autocomplete="username" hidden readonly>
+    <input class="lock-input" id="lockInput" type="password" name="password" autocomplete="current-password" placeholder="Passcode" required>
+    <div class="lock-error" id="lockError"></div>
+    <button class="save-btn" id="lockBtn" type="submit"><i class="bi bi-unlock-fill"></i> Unlock</button>
+    <p class="lock-foot">You only need it once on each device.</p>
+  </form>
+</div>
+
+<!-- READ-ONLY REIMBURSEMENT PAGE — opened from the link shared with Dad -->
+<main class="share-view" id="shareView">
+  <div class="share-wrap">
+    <div class="page-head">
+      <div class="page-eyebrow">Reimbursements for Dylan</div>
+      <h1 class="page-title" id="shareTitle">Loading…</h1>
+      <p class="page-sub" id="shareSub"></p>
+    </div>
+    <div class="list-card" id="shareList"></div>
+    <p class="share-foot" id="shareFoot">Read-only. Updates live from Dylan's expense tracker.</p>
+  </div>
+</main>
+
 <div class="app">
 
 <header class="topbar">
@@ -698,6 +865,7 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
     <div class="tab" onclick="showTab('dashboard')" id="tab-btn-dashboard" title="Dashboard  (2)"><i class="bi bi-bar-chart-fill"></i><span class="tab-label">Dashboard</span></div>
     <div class="tab" onclick="showTab('list')" id="tab-btn-list" title="Cards  (3)"><i class="bi bi-list-ul"></i><span class="tab-label">Cards</span></div>
     <div class="tab" onclick="showTab('table')" id="tab-btn-table" title="Table  (4)"><i class="bi bi-table"></i><span class="tab-label">Table</span></div>
+    <div class="tab" onclick="showTab('reimb')" id="tab-btn-reimb" title="Reimburse  (5)"><i class="bi bi-arrow-left-right"></i><span class="tab-label">Reimburse</span></div>
   </div>
   <div class="topbar-meta">
     <span class="nav-sync" id="syncStatus"><i class="bi bi-cloud"></i></span>
@@ -736,13 +904,22 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
     <div class="sync-row"><i class="bi bi-table" style="color:var(--green)"></i><span>Expenses → Google Sheets</span><a href="https://docs.google.com/spreadsheets/d/193exXTS041Quq_-VOS_0uXMMAv6RM6eFuKHMgkUkIXo/edit" target="_blank" style="color:var(--blue-text);font-size:12px;margin-left:auto">Open Sheet →</a></div>
     <div class="sync-row"><i class="bi bi-image" style="color:var(--blue-text)"></i><span>Receipts → Google Drive</span><a href="https://drive.google.com/drive/folders/1VtL_8OtIyHmute0nbAcr0LgCnoE6QLbV" target="_blank" style="color:var(--blue-text);font-size:12px;margin-left:auto">Open Folder →</a></div>
     <div class="sync-row"><i class="bi bi-clock" style="color:var(--text3)"></i><span id="lastSyncText">No syncs yet</span></div>
-
+    <div class="sync-row warn" id="backendRow" hidden><i class="bi bi-exclamation-triangle-fill"></i><span>Your Apps Script is the old version. Editing, budgets and sharing turn on once it's updated.</span></div>
+    <div class="sync-row" id="installRow" hidden><i class="bi bi-phone" style="color:var(--orange)"></i><span id="installText">Install as an app</span><button class="row-btn" id="installBtn" hidden onclick="installApp()">Install</button></div>
+    <div class="sync-row" id="lockRow" hidden><i class="bi bi-shield-lock" style="color:var(--green)"></i><span>Passcode on</span><button class="row-btn" onclick="lockDevice()">Lock this device</button></div>
   </div>
   <div class="metric-grid">
     <div class="metric"><div class="ml">Total Spent</div><div class="mv green" id="mTotal">$0</div><div class="ms" id="mCount">0 expenses</div></div>
     <div class="metric"><div class="ml">529 Eligible</div><div class="mv" id="m529">$0</div><div class="ms" id="m529pct">— of total</div></div>
     <div class="metric"><div class="ml">Reimb. Pending</div><div class="mv" id="mReimb">$0</div><div class="ms">owed to you</div></div>
     <div class="metric"><div class="ml">Top Category</div><div class="mv" style="font-size:13px;padding-top:4px" id="mTopCat">—</div><div class="ms" id="mTopAmt"></div></div>
+  </div>
+  <!-- BUDGETS -->
+  <div class="chart-card" id="budgetCard">
+    <div class="chart-title">Budgets <span class="title-meta" id="budgetMonth"></span>
+      <button class="mini-btn" onclick="openBudgetEditor()"><i class="bi bi-sliders"></i> Edit</button>
+    </div>
+    <div id="budgetBody"></div>
   </div>
   <!-- MASTER CATEGORY BREAKDOWN -->
   <div class="chart-card" id="breakdownCard">
@@ -892,6 +1069,49 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
   </div>
 </div>
 
+<!-- REIMBURSEMENTS -->
+<div class="page" id="tab-reimb">
+  <div class="narrow">
+    <div class="page-head">
+      <div class="page-eyebrow">Reimbursements</div>
+      <h2 class="page-title" id="reimbTitle">—</h2>
+      <p class="page-sub" id="reimbSub"></p>
+    </div>
+    <div class="reimb-actions">
+      <button class="export-btn" onclick="openShareReimb()"><i class="bi bi-send"></i> Share with Dad</button>
+      <button class="export-btn" id="reimbSelectAll" onclick="toggleSelectAllReimb()"><i class="bi bi-check2-all"></i> Select all</button>
+    </div>
+    <div class="list-card" id="reimbList"></div>
+    <div id="reimbDone"></div>
+  </div>
+  <div class="select-bar" id="reimbBar" hidden>
+    <span id="reimbBarText">0 selected</span>
+    <button class="save-btn" id="reimbBarBtn" onclick="markSelectedReimbursed()"><i class="bi bi-check2-circle"></i> Mark reimbursed</button>
+  </div>
+</div>
+
+</div>
+
+<!-- EDIT EXPENSE -->
+<div class="modal-overlay" id="editModal" onclick="if(event.target===this)closeEdit()">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="editTitle">Edit expense</span>
+      <button class="modal-close" onclick="closeEdit()">×</button>
+    </div>
+    <div class="modal-body" id="editBody"></div>
+  </div>
+</div>
+
+<!-- EDIT BUDGETS -->
+<div class="modal-overlay" id="budgetModal" onclick="if(event.target===this)closeBudgetEditor()">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Monthly budgets</span>
+      <button class="modal-close" onclick="closeBudgetEditor()">×</button>
+    </div>
+    <div class="modal-body" id="budgetEditBody"></div>
+  </div>
 </div>
 
 <!-- CATEGORY DRILL-DOWN MODAL -->
@@ -926,28 +1146,136 @@ kbd{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
 
 const CAT_ICONS={'Food & Dining':'bi-egg-fried','Tuition & Fees':'bi-bank2','Books & Supplies':'bi-book','Housing':'bi-house-fill','Transportation':'bi-car-front','Technology':'bi-laptop','Healthcare':'bi-heart-pulse','Entertainment':'bi-music-note-beamed','Clothing':'bi-shirt','Personal Care':'bi-stars','School Supplies':'bi-pencil-fill','Other':'bi-three-dots'};
 const CAT_COLORS=['#525B02','#4D8A84','#C47A38','#8A8E38','#3A6644','#695236','#B8725A','#7A9A92','#C4A882','#9E785E','#608880','#8A6848'];
-const SEMESTERS=['Spring 2025','Summer 2025','Fall 2025','Spring 2026','Summer 2026','Fall 2026','Spring 2027'];
+// Spring 2025 through next year, generated so the list never runs out
+function buildSemesters(){
+  const out=[], end=new Date().getFullYear()+1;
+  for(let y=2025;y<=end;y++) out.push('Spring '+y,'Summer '+y,'Fall '+y);
+  return out;
+}
+const SEMESTERS=buildSemesters();
 
 // ─── STATE ───
 let expenses=[], activeFilter='all', sortCol='date', sortDir=-1;
 let catChartInst, pieChartInst, timeChartInst;
-let processingQueue=[], isProcessing=false;
+let processingQueue=[], activeScans=0;
+const SCAN_CONCURRENCY=3;          // receipts read at the same time
+let budgets={};                     // { 'Eating Out': 150, Total: 900, … }
 
-// ─── SCRIPT URL ───
-function getScriptUrl(){ return 'https://script.google.com/macros/s/AKfycbzIESmXwsy9haJE2kjkFTutfAQQ5_iDPO9BLg0mFysp0obwJy4_AkRT-zP24mg3W5uCew/exec'; }
-function saveScriptUrl(){}
+// Safe storage: private windows and blocked site data throw on access
+const store={
+  get(k,d=''){ try{ const v=localStorage.getItem(k); return v===null?d:v; }catch{ return d; } },
+  set(k,v){ try{ localStorage.setItem(k,v); }catch{} },
+  del(k){ try{ localStorage.removeItem(k); }catch{} }
+};
+
+// ─── BACKEND (Google Apps Script) ───
+// The URL is public, so the backend checks a passcode on every request.
+// The passcode is typed once per device and kept in this browser only.
+const SCRIPT_URL='https://script.google.com/macros/s/AKfycbzIESmXwsy9haJE2kjkFTutfAQQ5_iDPO9BLg0mFysp0obwJy4_AkRT-zP24mg3W5uCew/exec';
+function getScriptUrl(){ return SCRIPT_URL; }
+function getKey(){ return store.get('exp_key'); }
+function setKey(k){ k ? store.set('exp_key',k) : store.del('exp_key'); }
+
+// 0 = not heard from yet · 1 = old script (no passcode, no editing) · 2 = current
+let backendVersion=0;
+function canWrite(){ return backendVersion>=2; }
+function requireWrite(){
+  if(canWrite()) return true;
+  toast(backendVersion===0 ? 'Still connecting to Google — try again in a moment' : 'Update your Apps Script first — see the Dashboard',true);
+  return false;
+}
+
+class LockedError extends Error{}
+
+function parseBackend(text){
+  const m=text.match(/\{[\s\S]*\}/);
+  if(!m) throw new Error('Google returned no data — is the Apps Script deployed?');
+  return JSON.parse(m[0]);
+}
+
+// Reads go over GET (the old script answers GET with data and ignores the
+// extra parameters, so a not-yet-updated backend can't be harmed by it).
+async function apiGet(params){
+  const resp=await fetch(SCRIPT_URL+'?'+new URLSearchParams(params).toString(),{method:'GET',redirect:'follow',cache:'no-store'});
+  if(!resp.ok) throw new Error('Google returned HTTP '+resp.status);
+  return parseBackend(await resp.text());
+}
+
+// Writes go over POST as a form field — a "simple" request, so no CORS
+// preflight — and the response is read, so a failed save is never reported
+// as saved.
+async function api(action,data={},{timeout=60000}={}){
+  const body=new URLSearchParams();
+  body.append('payload',JSON.stringify({...data,action,key:getKey()}));
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(),timeout);
+  let resp;
+  try{ resp=await fetch(SCRIPT_URL,{method:'POST',body,redirect:'follow',signal:ctrl.signal}); }
+  catch(e){ throw new Error(e.name==='AbortError'?'Timed out — check your connection':'Can’t reach Google — check your connection'); }
+  finally{ clearTimeout(timer); }
+  if(!resp.ok) throw new Error('Google returned HTTP '+resp.status);
+  const out=parseBackend(await resp.text());
+  if(out.locked){ showLock(out.error); throw new LockedError(out.error||'Locked'); }
+  if(!out.success) throw new Error(out.error||'Request failed');
+  return out;
+}
+function errMsg(e){ return (e&&e.message)||'Something went wrong'; }
+
 function checkSetup(){ updateSyncStatus(); }
 function updateSyncStatus(){
-  const url=getScriptUrl();
   const el=document.getElementById('syncStatus');
-  if(url){ el.className='nav-sync synced'; el.innerHTML='<i class="bi bi-cloud-check-fill"></i>'; }
-  else { el.className='nav-sync'; el.innerHTML='<i class="bi bi-cloud-slash"></i>'; }
-  const last=localStorage.getItem('last_sync');
+  el.className='nav-sync synced'; el.innerHTML='<i class="bi bi-cloud-check-fill"></i>';
+  const last=store.get('last_sync');
   if(last) document.getElementById('lastSyncText').textContent='Last synced: '+new Date(last).toLocaleString();
+  const br=document.getElementById('backendRow'); if(br) br.hidden=backendVersion!==1;
+  const lr=document.getElementById('lockRow');    if(lr) lr.hidden=backendVersion<2;
+}
+
+// ─── PASSCODE SCREEN ───
+function showLock(msg){
+  const el=document.getElementById('lockScreen');
+  if(!el) return;
+  el.hidden=false;
+  document.getElementById('lockError').textContent=(msg&&msg!=='Passcode required')?msg:'';
+  setTimeout(()=>document.getElementById('lockInput')?.focus(),60);
+}
+function hideLock(){ const el=document.getElementById('lockScreen'); if(el) el.hidden=true; }
+function isLocked(){ return !document.getElementById('lockScreen').hidden; }
+
+async function unlock(ev){
+  ev.preventDefault();
+  const input=document.getElementById('lockInput');
+  const btn=document.getElementById('lockBtn');
+  const err=document.getElementById('lockError');
+  const code=input.value.trim();
+  if(!code) return;
+  setKey(code);
+  btn.disabled=true; btn.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Checking…'; err.textContent='';
+  const ok=await loadExpenses();
+  btn.disabled=false; btn.innerHTML='<i class="bi bi-unlock-fill"></i> Unlock';
+  if(ok){
+    input.value='';
+    updateBadge(); updateSyncStatus(); renderActiveTab();
+    toast('✓ Unlocked');
+  } else if(!isLocked()){
+    // Load failed for a reason other than the passcode
+  } else if(!err.textContent){
+    err.textContent=lastLoadError||'Couldn’t reach Google — check your connection';
+  }
+}
+
+// Forget the passcode and every cached expense on this device
+function lockDevice(){
+  ['exp_key','ucf_expenses_v2','exp_budgets','exp_share','last_sync'].forEach(store.del);
+  expenses=[]; budgets={};
+  updateBadge(); renderActiveTab();
+  showLock('');
 }
 
 // ─── DATA LAYER — Google Sheets as source of truth, localStorage as cache ───
-function persistExpenses(){ localStorage.setItem('ucf_expenses_v2',JSON.stringify(expenses)); }
+function persistExpenses(){ store.set('ucf_expenses_v2',JSON.stringify(expenses)); }
+function persistBudgets(){ store.set('exp_budgets',JSON.stringify(budgets)); }
+function newExpId(){ return 'e'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 
 // Bring older rows onto the current shape. The sheet previously stored a
 // three-state `reimbStatus` ('Not yet' / 'Completed' / 'Not needed'); the
@@ -968,38 +1296,32 @@ function normalizeExpense(e){
 }
 function normalizeAll(list){ return (list||[]).map(normalizeExpense); }
 
+// Returns true only when fresh data came back from the Sheet. On a wrong or
+// missing passcode it shows the lock screen; offline, it keeps the cache.
+let lastLoadError='';
 async function loadExpenses() {
-  const url = getScriptUrl();
-  if (url) {
-    try {
-      const resp = await fetch(url + '?action=load', {
-        method: 'GET',
-        redirect: 'follow',
-        cache: 'no-store'
-      });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const text = await resp.text();
-      // Find JSON object in response (Apps Script sometimes adds extra text)
-      const match = text.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error('No JSON in response');
-      const data = JSON.parse(match[0]);
-      if (data.success && Array.isArray(data.expenses) && data.expenses.length > 0) {
-        expenses = normalizeAll(data.expenses);
-        persistExpenses();
-        return true; // success
-      }
-      if (data.expenses && data.expenses.length === 0) {
-        // Sheet is genuinely empty — also a success
-        expenses = [];
-        return true;
-      }
-      throw new Error(data.error || 'Unexpected response');
-    } catch(e) {
-      console.warn('Sheets load failed:', e.message);
+  lastLoadError='';
+  try {
+    const data = await apiGet({ action: 'load', key: getKey() });
+    if (data.locked) {
+      backendVersion = data.apiVersion || 2;
+      showLock(getKey() ? data.error : '');
+      lastLoadError = data.error || '';
+      return false;
     }
+    if (!data.success) throw new Error(data.error || 'Unexpected response');
+    backendVersion = data.apiVersion || 1;   // the old script sends no version
+    hideLock();
+    expenses = normalizeAll(data.expenses || []);
+    persistExpenses();
+    if (data.budgets && typeof data.budgets === 'object') { budgets = data.budgets; persistBudgets(); }
+    return true;
+  } catch(e) {
+    lastLoadError = errMsg(e);
+    console.warn('Sheets load failed:', e.message);
   }
-  // Fallback: localStorage
-  try { expenses = normalizeAll(JSON.parse(localStorage.getItem('ucf_expenses_v2') || '[]')); }
+  // Offline: keep what this device already has
+  try { expenses = normalizeAll(JSON.parse(store.get('ucf_expenses_v2','[]'))); }
   catch { expenses = []; }
   return false;
 }
@@ -1007,37 +1329,10 @@ async function loadExpenses() {
 async function refreshFromSheets() {
   const btn = document.getElementById('refreshBtn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Refreshing…'; }
-  await loadAndRenderDashboard();
+  const ok = await loadAndRenderDashboard();
   if (btn) { btn.disabled = false; btn.innerHTML = '↻ Refresh'; }
-  toast('✓ Refreshed ' + expenses.length + ' expenses');
-}
-
-async function importHistoricalFromWeb() {
-  const btn = document.getElementById('importBtn');
-  btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Importing 262 expenses… (takes ~30 sec)';
-  btn.disabled = true;
-
-  try {
-    const body = new URLSearchParams();
-    body.append('payload', JSON.stringify({ action: 'import_historical' }));
-    await fetch(getScriptUrl(), {
-      method: 'POST',
-      mode: 'no-cors',
-      body: body
-    });
-    // no-cors means we can't read the response, but it ran
-    await sleep(3000); // wait for Apps Script to finish
-    btn.innerHTML = '<i class="bi bi-check2-circle"></i> Imported! Click ↻ Refresh to see data';
-    btn.style.background = 'rgba(58,102,68,0.10)';
-    btn.style.borderColor = 'var(--green)';
-    btn.style.color = 'var(--green)';
-    toast('✓ Import triggered! Refreshing data…');
-    await sleep(2000);
-    await loadAndRenderDashboard();
-  } catch(e) {
-    btn.innerHTML = '<i class="bi bi-exclamation-circle-fill"></i> Failed — run importHistoricalData in Apps Script manually';
-    btn.disabled = false;
-  }
+  if (ok) toast('✓ Refreshed ' + expenses.length + ' expenses');
+  else if (!isLocked()) toast('Couldn’t reach Google — showing saved data', true);
 }
 
 async function loadAndRenderDashboard() {
@@ -1053,20 +1348,34 @@ async function loadAndRenderDashboard() {
       ? 'Synced ' + expenses.length + ' expenses · ' + now
       : 'Sheets offline — cached data (' + expenses.length + ' entries)';
   }
-  if (fromSheets) localStorage.setItem('last_sync', new Date().toISOString());
+  if (fromSheets) store.set('last_sync', new Date().toISOString());
+  updateSyncStatus();
   renderCharts();
+  return fromSheets;
 }
 
 // ─── TABS ───
+const TABS=['upload','dashboard','list','table','reimb'];
+function currentTab(){ return TABS.find(t=>document.getElementById('tab-'+t)?.classList.contains('active')); }
 function showTab(id){
-  ['upload','dashboard','list','table'].forEach(t=>{
+  TABS.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===id);
     document.getElementById('tab-btn-'+t).classList.toggle('active',t===id);
   });
+  if(id!=='reimb') document.getElementById('reimbBar').hidden=true;
   if(id==='dashboard') loadAndRenderDashboard();
   if(id==='list')      ensureDataThen(renderList);
   if(id==='table')     ensureDataThen(renderTable);
+  if(id==='reimb')     ensureDataThen(renderReimb);
   updateBadge();
+}
+// Redraw whatever is on screen after data changes
+function renderActiveTab(){
+  const t=currentTab();
+  if(t==='dashboard') renderCharts();
+  if(t==='list')      renderList();
+  if(t==='table')     renderTable();
+  if(t==='reimb')     renderReimb();
 }
 
 // Load from Sheets if we have no data, then call fn
@@ -1085,26 +1394,16 @@ dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');}
 dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
 dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');handleFiles(Array.from(e.dataTransfer.files));});
 document.getElementById('fileInput').addEventListener('change',e=>{handleFiles(Array.from(e.target.files));e.target.value='';});
-function handleFiles(files){ files.filter(f=>f.type.startsWith('image/')).forEach(f=>processingQueue.push(f)); runQueue(); }
-async function runQueue(){
-  if(isProcessing||!processingQueue.length) return;
-  isProcessing=true;
-  while(processingQueue.length){ const f=processingQueue.shift(); await processFile(f); if(processingQueue.length) await sleep(1500); }
-  isProcessing=false;
+function handleFiles(files){ files.filter(f=>f.type.startsWith('image/')).forEach(f=>processingQueue.push(f)); pumpQueue(); }
+// Several receipts are read at once instead of one at a time with a pause
+function pumpQueue(){
+  while(activeScans<SCAN_CONCURRENCY && processingQueue.length){
+    const f=processingQueue.shift();
+    activeScans++;
+    processFile(f).catch(e=>console.error(e)).finally(()=>{ activeScans--; pumpQueue(); });
+  }
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-
-// ─── POST TO APPS SCRIPT (URLSearchParams = simple CORS request, no preflight) ───
-async function postToAppsScript(url, data) {
-  const body = new URLSearchParams();
-  body.append('payload', JSON.stringify(data));
-  await fetch(url, {
-    method: 'POST',
-    mode: 'no-cors',
-    body: body
-  });
-  // no-cors means we can't read response, but data is sent → Apps Script receives it via e.parameter.payload
-}
 
 async function processFile(file){
   const uid='q'+Date.now()+Math.random().toString(36).slice(2,5);
@@ -1123,8 +1422,18 @@ async function processFile(file){
     if (Math.abs(shift) > 1) window.scrollBy({ top: shift, behavior: 'instant' });
   }
 
-  const b64AI=await compressToBase64(file,1600,0.82);
-  const b64Store=await compressToBase64(file,1000,0.78); // for Google Drive
+  let b64AI, b64Store;
+  try{
+    b64AI=await compressToBase64(file,1600,0.82);
+    b64Store=await compressToBase64(file,1000,0.78); // for Google Drive
+  }catch(e){
+    // e.g. a HEIC photo dragged in on a computer whose browser can't open it
+    item.querySelector('.q-status').className='q-status error';
+    item.querySelector('.q-status').textContent='Can’t open this file — try a JPG or PNG';
+    item.querySelector('.q-thumb').removeAttribute('src');
+    setTimeout(()=>item.remove(),6000);
+    return;
+  }
 
   try{
     const result=await readReceiptWithGemini(b64AI);
@@ -1133,6 +1442,7 @@ async function processFile(file){
     renderForm(uid,result,objUrl,b64Store);
   }catch(e){
     console.error(e);
+    if(e instanceof LockedError){ item.remove(); return; }
     item.querySelector('.q-status').className='q-status error';
     item.querySelector('.q-status').textContent=e.message?.slice(0,70)||'Error — fill manually';
     renderForm(uid,{},objUrl,b64Store);
@@ -1159,22 +1469,8 @@ function compressToBase64(file,maxPx,quality){
 // The browser posts an image and receives parsed JSON. Model choice, the
 // prompt, retries and the API key all live server-side in Code.gs.
 async function readReceiptWithGemini(b64){
-  const body = new URLSearchParams();
-  body.append('payload', JSON.stringify({ action: 'scan', imageBase64: b64 }));
-
-  const resp = await fetch(getScriptUrl(), { method: 'POST', body, redirect: 'follow' });
-  if (!resp.ok) throw new Error('Scanner unreachable (HTTP ' + resp.status + ')');
-
-  const text = await resp.text();
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('Scanner returned no JSON — redeploy Apps Script?');
-
-  let out;
-  try { out = JSON.parse(match[0]); }
-  catch { throw new Error('Scanner returned malformed JSON'); }
-
-  if (!out.success) throw new Error(out.error || 'Scan failed');
-  return out.data;
+  const out = await api('scan', { imageBase64: b64 }, { timeout: 90000 });
+  return out.data || {};
 }
 
 // ─── 529 AUTO-DETERMINATION ───
@@ -1308,8 +1604,15 @@ function semesterFromDate(dateStr) {
   if (m <= 4) sem = 'Spring ' + y;       // Jan–May
   else if (m <= 7) sem = 'Summer ' + y;  // Jun–Aug
   else sem = 'Fall ' + y;                 // Sep–Dec
-  // Return it if it's in our semesters list, otherwise closest
-  return SEMESTERS.includes(sem) ? sem : (SEMESTERS[SEMESTERS.length - 1]);
+  // Always the real semester — the old version silently fell back to the
+  // last one in a hardcoded list, which would have mislabeled everything
+  // after Spring 2027.
+  return isNaN(y) ? currentSemester() : sem;
+}
+// Dropdown options, including a semester outside the generated range
+function semesterOptions(sel){
+  const list = SEMESTERS.includes(sel) || !sel ? SEMESTERS : SEMESTERS.concat([sel]);
+  return list.map(s=>`<option value="${s}"${s===sel?' selected':''}>${s}</option>`).join('');
 }
 
 // ─── FORM ───
@@ -1351,10 +1654,10 @@ function renderForm(uid,p,thumbUrl,b64Store){
     <div class="field"><label>Place / Vendor</label><input type="text" id="${uid}-place" value="${esc(p.place||'')}"></div>
     <div class="field-row">
       <div class="field"><label>Amount ($)</label><input type="number" step="0.01" min="0" id="${uid}-amt" value="${p.amount||''}"></div>
-      <div class="field"><label>Date</label><input type="date" id="${uid}-date" value="${p.date||today2}"></div>
+      <div class="field"><label>Date</label><input type="date" id="${uid}-date" value="${p.date||today2}" onchange="syncSemester('${uid}-date','${uid}-sem')"></div>
     </div>
     <div class="field"><label>Category</label><select id="${uid}-cat">${cats.map(c=>`<option value="${c}"${c===(p.category||'')?'  selected':''}>${c}</option>`).join('')}</select></div>
-    <div class="field"><label>Semester</label><select id="${uid}-sem">${SEMESTERS.map(s=>`<option value="${s}"${s===sem?' selected':''}>${s}</option>`).join('')}</select></div>
+    <div class="field"><label>Semester</label><select id="${uid}-sem">${semesterOptions(sem)}</select></div>
     <div class="field"><label>Additional info</label><input type="text" id="${uid}-notes" value="${esc(p.notes||'')}"></div>
     <div class="field-row">
       <div class="field">
@@ -1382,10 +1685,26 @@ function pick(el,rowId,valId,val){
   document.getElementById(valId).value=val;
 }
 
+// Changing the date moves the semester with it
+function syncSemester(dateId,semId){
+  const d=document.getElementById(dateId)?.value, sel=document.getElementById(semId);
+  if(!d||!sel) return;
+  const sem=semesterFromDate(d);
+  if(![...sel.options].some(o=>o.value===sem)) sel.add(new Option(sem,sem));
+  sel.value=sem;
+}
+
 // ─── SAVE TO GOOGLE ───
-async function saveExpense(uid){
+// Reads the backend's answer: a save only says "Saved" once Google confirms
+// it. On failure the form stays put with a Try again button, and the same
+// ID is reused so a retry can never create a duplicate row.
+async function saveExpense(uid, quiet=false){
+  const item=document.getElementById(uid);
+  const f=document.getElementById(uid+'-form');
+  if(!item||!f) return false;
+  if(!f._expId) f._expId=newExpId();
   const exp={
-    id:Date.now().toString()+Math.random().toString(36).slice(2,5),
+    id:f._expId,
     timestamp:new Date().toISOString(),
     place:document.getElementById(uid+'-place').value.trim()||'Unknown',
     amount:parseFloat(document.getElementById(uid+'-amt').value)||0,
@@ -1401,45 +1720,45 @@ async function saveExpense(uid){
     savedToGoogle:false,
   };
 
-  // Update button to show saving
   const btn=document.getElementById(uid+'-savebtn');
-  const statusEl=document.getElementById(uid).querySelector('.q-status');
+  const statusEl=item.querySelector('.q-status');
   btn.disabled=true;
   btn.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Saving to Google…';
   statusEl.className='q-status saving';
   statusEl.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Uploading…';
 
-  const f=document.getElementById(uid+'-form');
-  const b64=f._b64Store||null;
-  const scriptUrl=getScriptUrl();
-
-  if(scriptUrl){
-    try{
-      const payload={...exp, imageBase64: b64||''};
-      await postToAppsScript(scriptUrl, payload);
-      exp.savedToGoogle=true;
-      localStorage.setItem('last_sync',new Date().toISOString());
-      statusEl.className='q-status saved';
-      statusEl.innerHTML='<i class="bi bi-cloud-check-fill"></i> Saved to Google!';
-      updateSyncStatus();
-    }catch(e){
-      console.error('Google sync failed:',e);
-      statusEl.className='q-status error';
-      statusEl.textContent='Saved locally (Google sync failed)';
-    }
-  } else {
+  try{
+    const out=await api('add',{...exp, imageBase64:f._b64Store||''},{timeout:90000});
+    const saved=normalizeExpense({
+      ...exp, ...(out.expense||{}),
+      id: out.id || exp.id,
+      receiptUrl: out.receiptUrl || (out.expense&&out.expense.receiptUrl) || '',
+      savedToGoogle:true
+    });
+    if(!expenses.some(e=>e.id===saved.id)) expenses.push(saved);
+    persistExpenses();
+    updateBadge();
+    store.set('last_sync',new Date().toISOString());
+    updateSyncStatus();
     statusEl.className='q-status saved';
-    statusEl.innerHTML='<i class="bi bi-floppy"></i> Saved locally';
+    statusEl.innerHTML='<i class="bi bi-cloud-check-fill"></i> Saved to Google';
+    const imgFailed=String(saved.receiptUrl).startsWith('UPLOAD_FAILED');
+    if(imgFailed) toast('Saved, but the receipt photo didn’t upload to Drive',true);
+    else if(!quiet) toast(out.duplicate?'✓ Already saved':'✓ Saved to Google Sheets + Drive');
+    await sleep(900);
+    item.remove();
+    updateSubmitAllBtn();
+    return true;
+  }catch(e){
+    console.error('Save failed:',e);
+    if(!document.body.contains(item)) return false;
+    statusEl.className='q-status error';
+    statusEl.textContent=e instanceof LockedError ? 'Not saved — unlock first' : 'Not saved — '+errMsg(e).slice(0,48);
+    btn.disabled=false;
+    btn.innerHTML='<i class="bi bi-arrow-clockwise"></i> Try again';
+    updateSubmitAllBtn();
+    return false;
   }
-
-  expenses.push(exp);
-  persistExpenses();
-  updateBadge();
-
-  await sleep(1200);
-  document.getElementById(uid).remove();
-  updateSubmitAllBtn();
-  toast(exp.savedToGoogle ? '✓ Saved to Google Sheets + Drive!' : '✓ Saved locally — connect Google to sync');
 }
 
 // ─── DASHBOARD GREETING ───
@@ -1466,6 +1785,7 @@ function renderGreeting(){
 // ─── CHARTS ───
 function renderCharts(){
   renderGreeting();
+  renderBudgets();
   renderBreakdown();
   const cats={},byDate={};
   let total=0,total529=0,totalReimb=0;
@@ -1524,7 +1844,7 @@ function renderList(){
     const tagGoogle=e.savedToGoogle?'<span class="tag tag-gdrive"><i class="bi bi-cloud-check-fill" style="font-size:11px"></i> Google</span>':'';
     const viewBtn=e.receiptUrl?`<button class="view-receipt-btn" onclick="openReceiptModal('${e.id}')"><i class="bi bi-zoom-in"></i> View Receipt in Drive</button>`:'';
     return `<div class="exp-card">
-      <div class="exp-card-top">
+      <div class="exp-card-top" onclick="openEdit('${e.id}')">
         <div class="exp-receipt-placeholder"><i class="bi bi-receipt"></i></div>
         <div class="exp-icon" style="background:${color}20;border:1px solid ${color}30"><i class="bi ${icon}" style="color:${color}"></i></div>
         <div class="exp-info">
@@ -1535,7 +1855,7 @@ function renderList(){
         </div>
         <div class="exp-right">
           <div class="exp-amt">${money(e.amount)}</div>
-          <button class="delete-btn" onclick="deleteExp('${e.id}')"><i class="bi bi-trash"></i></button>
+          <button class="icon-btn" onclick="event.stopPropagation();openEdit('${e.id}')" title="Edit" aria-label="Edit"><i class="bi bi-pencil"></i></button>
         </div>
       </div>
       ${viewBtn}
@@ -1567,7 +1887,7 @@ function renderTable(){
       <td>${e.semester||'—'}</td>
       <td>${driveCell}</td>
       <td style="color:var(--text3);font-style:italic;max-width:130px;overflow:hidden;text-overflow:ellipsis">${esc(e.notes||'—')}</td>
-      <td><button class="delete-btn" onclick="deleteExp('${e.id}')"><i class="bi bi-trash"></i></button></td>
+      <td><button class="icon-btn" onclick="openEdit('${e.id}')" title="Edit" aria-label="Edit"><i class="bi bi-pencil"></i></button></td>
     </tr>`;
   }).join('');
   const total=data.reduce((s,e)=>s+(e.amount||0),0);
@@ -1597,12 +1917,353 @@ function openReceiptModal(expId){
 }
 function closeModal(){ document.getElementById('modalOverlay').classList.remove('open'); }
 
-// ─── DELETE ───
-async function deleteExp(id){
-  if(!confirm('Delete this expense? The receipt in Google Drive will remain.')) return;
-  expenses=expenses.filter(e=>e.id!==id);
+// ─── EDIT / DELETE ───
+// Changes go to the Sheet first and only show here once Google confirms,
+// so the next sync can never undo them.
+function applyUpdates(list){
+  (list||[]).forEach(u=>{
+    const i=expenses.findIndex(e=>e.id===u.id);
+    if(i>=0) expenses[i]=normalizeExpense({...expenses[i],...u});
+  });
   persistExpenses();
-  renderList(); renderTable(); updateBadge();
+}
+
+let editingId=null, deleteArmTimer=null;
+function pillRow(id,values,selected){
+  const cls=v=>v!==selected?'':(v==='Yes'?'p-green':v==='No'?'p-red':'p-blue');
+  return `<div class="pill-row" id="${id}-row">${values.map(v=>`<div class="pill ${cls(v)}" onclick="pick(this,'${id}-row','${id}','${v}')">${v}</div>`).join('')}</div><input type="hidden" id="${id}" value="${esc(selected)}">`;
+}
+function openEdit(id){
+  const e=expenses.find(x=>x.id===id);
+  if(!e) return;
+  if(!requireWrite()) return;
+  if(String(e.id).startsWith('sheet-')){ toast('Refresh first so this expense gets its ID',true); return; }
+  editingId=id;
+  document.getElementById('editTitle').textContent=e.place||'Edit expense';
+  const cats=Object.keys(CAT_ICONS);
+  const hasReceipt=/^https:\/\//.test(e.receiptUrl||'');
+  document.getElementById('editBody').innerHTML=`
+    <div class="field"><label>529 Eligible?</label>${pillRow('ed-529',['Yes','No','Not Sure'],e.is529||'Not Sure')}</div>
+    <div class="field"><label>Place / Vendor</label><input type="text" id="ed-place" value="${esc(e.place)}"></div>
+    <div class="field-row">
+      <div class="field"><label>Amount ($)</label><input type="number" step="0.01" min="0" inputmode="decimal" id="ed-amt" value="${e.amount}"></div>
+      <div class="field"><label>Date</label><input type="date" id="ed-date" value="${esc(e.date)}" onchange="syncSemester('ed-date','ed-sem')"></div>
+    </div>
+    <div class="field"><label>Category</label><select id="ed-cat">${cats.map(c=>`<option value="${c}"${c===e.category?' selected':''}>${c}</option>`).join('')}</select></div>
+    <div class="field"><label>Semester</label><select id="ed-sem">${semesterOptions(e.semester||semesterFromDate(e.date))}</select></div>
+    <div class="field"><label>Additional info</label><input type="text" id="ed-notes" value="${esc(e.notes)}"></div>
+    <div class="field-row">
+      <div class="field"><label>Need reimbursement?</label>${pillRow('ed-needs',['Yes','No'],e.needsReimb==='Yes'?'Yes':'No')}</div>
+      <div class="field"><label>Reimbursed?</label>${pillRow('ed-paid',['Yes','No'],e.reimbursed==='Yes'?'Yes':'No')}</div>
+    </div>
+    ${hasReceipt?`<div class="edit-receipt"><i class="bi bi-image"></i> Receipt in Drive<a href="${esc(e.receiptUrl)}" target="_blank" rel="noopener">Open →</a></div>`:''}
+    <button class="save-btn" id="ed-save" onclick="saveEdit()"><i class="bi bi-check2"></i> Save changes</button>
+    <button class="danger-btn" id="ed-del" onclick="deleteFromEdit()"><i class="bi bi-trash"></i> Delete expense</button>`;
+  document.getElementById('editModal').classList.add('open');
+}
+function closeEdit(){
+  document.getElementById('editModal').classList.remove('open');
+  editingId=null; clearTimeout(deleteArmTimer);
+}
+async function saveEdit(){
+  const e=expenses.find(x=>x.id===editingId);
+  if(!e) return closeEdit();
+  const v=id=>document.getElementById(id).value;
+  const amt=parseFloat(v('ed-amt'));
+  if(isNaN(amt)||amt<0){ toast('Enter an amount of $0 or more',true); return; }
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(v('ed-date'))){ toast('Pick a date',true); return; }
+  const next={ place:v('ed-place').trim()||'Unknown', amount:Math.round(amt*100)/100, date:v('ed-date'),
+    category:v('ed-cat'), semester:v('ed-sem'), notes:v('ed-notes').trim(),
+    is529:v('ed-529'), needsReimb:v('ed-needs'), reimbursed:v('ed-paid') };
+  const changes={};
+  Object.keys(next).forEach(k=>{ if(String(next[k])!==String(e[k]??'')) changes[k]=next[k]; });
+  if(!Object.keys(changes).length){ closeEdit(); return; }
+  const btn=document.getElementById('ed-save');
+  btn.disabled=true; btn.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Saving…';
+  try{
+    const out=await api('update',{id:e.id,changes});
+    applyUpdates(out.updated);
+    closeEdit(); renderActiveTab();
+    toast('✓ Saved');
+  }catch(err){
+    btn.disabled=false; btn.innerHTML='<i class="bi bi-check2"></i> Save changes';
+    if(!(err instanceof LockedError)) toast('Not saved — '+errMsg(err),true);
+  }
+}
+// Two taps instead of a browser confirm() box
+async function deleteFromEdit(){
+  const btn=document.getElementById('ed-del');
+  if(!btn.classList.contains('armed')){
+    btn.classList.add('armed'); btn.innerHTML='<i class="bi bi-exclamation-triangle"></i> Tap again to delete';
+    clearTimeout(deleteArmTimer);
+    deleteArmTimer=setTimeout(()=>{ btn.classList.remove('armed'); btn.innerHTML='<i class="bi bi-trash"></i> Delete expense'; },4000);
+    return;
+  }
+  clearTimeout(deleteArmTimer);
+  const id=editingId;
+  btn.disabled=true; btn.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Deleting…';
+  try{
+    await api('delete',{id});
+    expenses=expenses.filter(x=>x.id!==id);
+    persistExpenses(); updateBadge();
+    closeEdit(); renderActiveTab();
+    toast('Deleted — a copy is kept in the Sheet’s “Deleted” tab');
+  }catch(err){
+    btn.disabled=false; btn.classList.remove('armed'); btn.innerHTML='<i class="bi bi-trash"></i> Delete expense';
+    if(!(err instanceof LockedError)) toast('Not deleted — '+errMsg(err),true);
+  }
+}
+
+// ─── REIMBURSEMENTS ───
+const reimbSelected=new Set();
+const isPendingReimb=e=>e.needsReimb==='Yes'&&e.reimbursed!=='Yes';
+function shortDate(d,yr=true){ return d?new Date(d+'T12:00:00').toLocaleDateString('en-US',yr?{month:'short',day:'numeric',year:'numeric'}:{month:'short',day:'numeric'}):''; }
+function reimbRowHtml(e,{pick=false,undo=false}={}){
+  const sel=reimbSelected.has(e.id);
+  const receipt=/^https:\/\//.test(e.receiptUrl||'')
+    ?`<a class="reimb-receipt" href="${esc(e.receiptUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Receipt" aria-label="Open receipt"><i class="bi bi-image"></i></a>`
+    :`<span class="reimb-receipt none" title="No receipt"><i class="bi bi-image"></i></span>`;
+  const meta=[shortDate(e.date),e.category,e.notes].filter(Boolean).map(esc).join(' · ');
+  return `<div class="reimb-row${pick?' pick':''}${sel?' sel':''}" ${pick?`role="checkbox" aria-checked="${sel}" tabindex="0" onclick="toggleReimb('${e.id}')" onkeydown="if(event.key===' '||event.key==='Enter'){event.preventDefault();toggleReimb('${e.id}')}"`:''}>
+    ${pick?'<span class="check"><i class="bi bi-check-lg"></i></span>':''}
+    <div class="reimb-info"><div class="reimb-name">${esc(e.place)}</div><div class="reimb-meta">${meta}</div></div>
+    <div class="reimb-amt">${money(e.amount)}</div>
+    ${receipt}
+    ${undo?`<button class="undo-btn" onclick="setReimbursed(['${e.id}'],'No')">Undo</button>`:''}
+  </div>`;
+}
+function renderReimb(){
+  const pending=expenses.filter(isPendingReimb).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  [...reimbSelected].forEach(id=>{ if(!pending.some(e=>e.id===id)) reimbSelected.delete(id); });
+  const total=pending.reduce((s,e)=>s+(e.amount||0),0);
+  document.getElementById('reimbTitle').textContent=pending.length?money(total)+' owed to you':'All caught up';
+  document.getElementById('reimbSub').innerHTML=pending.length
+    ?`<strong>${pending.length}</strong> expense${pending.length===1?'':'s'} waiting, the oldest from ${shortDate(pending[0].date)}. Tap the ones Dad paid back.`
+    :'Nothing is waiting to be reimbursed.';
+  document.getElementById('reimbList').innerHTML=pending.length
+    ?pending.map(e=>reimbRowHtml(e,{pick:true})).join('')
+    :`<div class="empty-state" style="padding:40px 24px"><i class="bi bi-check2-circle"></i><p>When an expense is marked “Need reimbursement”, it shows up here.</p></div>`;
+  document.getElementById('reimbSelectAll').style.visibility=pending.length?'visible':'hidden';
+  document.getElementById('reimbSelectAll').innerHTML=pending.length&&reimbSelected.size===pending.length
+    ?'<i class="bi bi-x-lg"></i> Clear selection':'<i class="bi bi-check2-all"></i> Select all';
+  const done=expenses.filter(e=>e.needsReimb==='Yes'&&e.reimbursed==='Yes')
+    .sort((a,b)=>(b.date||'').localeCompare(a.date||'')).slice(0,8);
+  document.getElementById('reimbDone').innerHTML=done.length
+    ?`<div class="section-label">Already reimbursed</div><div class="list-card">${done.map(e=>reimbRowHtml(e,{undo:true})).join('')}</div>`:'';
+  updateReimbBar();
+}
+function toggleReimb(id){ reimbSelected.has(id)?reimbSelected.delete(id):reimbSelected.add(id); renderReimb(); }
+function toggleSelectAllReimb(){
+  const pending=expenses.filter(isPendingReimb);
+  if(reimbSelected.size===pending.length) reimbSelected.clear(); else pending.forEach(e=>reimbSelected.add(e.id));
+  renderReimb();
+}
+function updateReimbBar(){
+  const bar=document.getElementById('reimbBar');
+  const n=reimbSelected.size;
+  bar.hidden=!n||currentTab()!=='reimb';
+  if(!n) return;
+  const sum=expenses.filter(e=>reimbSelected.has(e.id)).reduce((s,e)=>s+(e.amount||0),0);
+  document.getElementById('reimbBarText').textContent=`${n} selected · ${money(sum)}`;
+}
+function markSelectedReimbursed(){ setReimbursed([...reimbSelected],'Yes'); }
+async function setReimbursed(ids,val){
+  if(!ids.length||!requireWrite()) return;
+  const btn=document.getElementById('reimbBarBtn');
+  if(val==='Yes'){ btn.disabled=true; btn.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Saving…'; }
+  try{
+    const out=await api('update',{ids,changes:{reimbursed:val}});
+    applyUpdates(out.updated);
+    if(val==='Yes') reimbSelected.clear();
+    renderReimb();
+    toast(val==='Yes'?`✓ Marked ${ids.length} as reimbursed`:'Moved back to waiting');
+  }catch(err){
+    if(!(err instanceof LockedError)) toast('Not saved — '+errMsg(err),true);
+  }finally{
+    btn.disabled=false; btn.innerHTML='<i class="bi bi-check2-circle"></i> Mark reimbursed';
+  }
+}
+
+// Link for Dad: a separate key that can only read the "waiting" list
+function shareUrl(k){ return location.origin+location.pathname+'?reimb='+encodeURIComponent(k); }
+async function openShareReimb(reset=false){
+  if(!requireWrite()) return;
+  let k=reset?'':store.get('exp_share');
+  if(!k){
+    try{ k=(await api('shareLink',{reset})).share; store.set('exp_share',k); }
+    catch(err){ if(!(err instanceof LockedError)) toast('Couldn’t make a link — '+errMsg(err),true); return; }
+  }
+  const url=shareUrl(k);
+  document.getElementById('modalTitle').textContent='Share with Dad';
+  document.getElementById('modalBody').innerHTML=`
+    <p class="modal-note">This link shows only what’s waiting to be reimbursed, with receipts. It can’t see your other expenses or change anything.</p>
+    <input class="link-field" id="shareLinkField" value="${esc(url)}" readonly onclick="this.select()">
+    <div class="btn-row">
+      <button class="save-btn" onclick="copyShareLink()"><i class="bi bi-clipboard"></i> Copy link</button>
+      ${navigator.share?`<button class="export-btn" onclick="nativeShare()"><i class="bi bi-box-arrow-up"></i> Share…</button>`:''}
+    </div>
+    <div class="btn-row"><a class="export-btn" href="${esc(url)}" target="_blank" rel="noopener" style="text-decoration:none"><i class="bi bi-eye"></i> Preview</a></div>
+    <button class="text-btn" onclick="openShareReimb(true)">Make a new link (old links stop working)</button>`;
+  document.getElementById('modalOverlay').classList.add('open');
+  if(reset) toast('New link made — the old one no longer works');
+}
+async function copyShareLink(){
+  const f=document.getElementById('shareLinkField');
+  try{ await navigator.clipboard.writeText(f.value); toast('✓ Link copied'); }
+  catch{ f.select(); toast('Press ⌘C to copy'); }
+}
+async function nativeShare(){
+  const url=document.getElementById('shareLinkField').value;
+  try{ await navigator.share({title:'Reimbursements',text:'Here’s what’s waiting to be reimbursed for school:',url}); }catch{}
+}
+
+// Dad's read-only page
+async function renderShareView(k){
+  document.title='Reimbursements for Dylan';
+  const title=document.getElementById('shareTitle'), sub=document.getElementById('shareSub'), list=document.getElementById('shareList');
+  try{
+    const data=await apiGet({action:'reimb',share:k});
+    if(!data.success) throw new Error(data.error||'This link has expired.');
+    const items=(data.items||[]).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    const total=items.reduce((s,e)=>s+(Number(e.amount)||0),0);
+    title.textContent=items.length?money(total)+' to reimburse':'Nothing to reimburse';
+    sub.innerHTML=items.length?`<strong>${items.length}</strong> expense${items.length===1?'':'s'}. Tap the picture icon to see a receipt.`:'Dylan is all caught up.';
+    list.innerHTML=items.length?items.map(e=>reimbRowHtml(e)).join(''):'';
+    list.style.display=items.length?'':'none';
+    document.getElementById('shareFoot').textContent='Read-only · updated '+new Date(data.generated||Date.now()).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  }catch(e){
+    title.textContent='Link not available';
+    sub.textContent=errMsg(e);
+    list.style.display='none';
+  }
+}
+
+// ─── BUDGETS ───
+// Monthly limits per dashboard category (Groceries and Eating Out are
+// separate there, which is what makes a food budget useful), plus an
+// optional overall "Total". Stored in the Sheet's Budgets tab so phone and
+// computer agree.
+function monthKeyOf(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function budgetMeta(cat){ return cat==='Total'?{color:'#3A6644',icon:'bi-wallet2'}:(EFF_META[cat]||EFF_META['Other']); }
+
+function renderBudgets(){
+  const body=document.getElementById('budgetBody');
+  if(!body) return;
+  const now=new Date(), mk=monthKeyOf(now);
+  const monthName=now.toLocaleDateString('en-US',{month:'long'});
+  document.getElementById('budgetMonth').textContent='· '+monthName;
+  const cats=Object.keys(budgets).filter(k=>budgets[k]>0);
+  if(!cats.length){
+    body.innerHTML=`<div class="budget-empty"><span>Set a monthly limit for the categories you want to keep an eye on, like Eating Out or a total for the month.</span>
+      <button class="export-btn" onclick="openBudgetEditor()"><i class="bi bi-plus-lg"></i> Set budgets</button></div>`;
+    return;
+  }
+  const spent={}; let total=0;
+  expenses.forEach(e=>{
+    if((e.date||'').slice(0,7)!==mk) return;
+    const c=effCategory(e), a=e.amount||0;
+    spent[c]=(spent[c]||0)+a; total+=a;
+  });
+  const daysIn=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+  const pace=now.getDate()/daysIn;
+  const rows=cats.filter(c=>c!=='Total')
+    .map(c=>({cat:c,spent:spent[c]||0,limit:budgets[c]}))
+    .sort((a,b)=>b.spent/b.limit-a.spent/a.limit);
+  const totalRow=budgets.Total?budgetRowHtml({cat:'Total',spent:total,limit:budgets.Total},pace,true):'';
+  body.innerHTML=totalRow
+    +(rows.length?`<div class="budget-grid">${rows.map(r=>budgetRowHtml(r,pace)).join('')}</div>`:'')
+    +`<div class="budget-foot"><span class="pace-key"></span>Today’s mark — where you’d be spending evenly through ${monthName} (day ${now.getDate()} of ${daysIn})</div>`;
+}
+function budgetRowHtml(r,pace,big=false){
+  const pct=r.limit?r.spent/r.limit:0;
+  const state=pct>1?'over':pct>=0.85?'warn':'';
+  const meta=budgetMeta(r.cat);
+  const left=r.limit-r.spent;
+  return `<div class="budget-row ${state}${big?' big':''}">
+    <span class="bd-swatch" style="background:${meta.color}1F;border:1px solid ${meta.color}33"><i class="bi ${meta.icon}" style="color:${meta.color}"></i></span>
+    <div class="budget-name">${r.cat==='Total'?'Total spending':esc(r.cat)}</div>
+    <div class="budget-nums">${money0(r.spent)} <span style="color:var(--text3);font-weight:500">of ${money0(r.limit)}</span>
+      <small>${left>=0?money0(left)+' left':money0(-left)+' over'}</small></div>
+    <div class="budget-track" title="${Math.round(pct*100)}% used">
+      <span class="budget-fill" style="width:${Math.min(100,pct*100).toFixed(1)}%"></span>
+      <span class="budget-pace" style="left:${(pace*100).toFixed(1)}%"></span>
+    </div>
+  </div>`;
+}
+
+// Average of the last three full months, as a starting point for each limit
+function recentMonthlyAverages(){
+  const now=new Date(), keys=[];
+  for(let i=1;i<=3;i++) keys.push(monthKeyOf(new Date(now.getFullYear(),now.getMonth()-i,1)));
+  const sums={Total:0};
+  expenses.forEach(e=>{
+    if(!keys.includes((e.date||'').slice(0,7))) return;
+    const c=effCategory(e), a=e.amount||0;
+    sums[c]=(sums[c]||0)+a; sums.Total+=a;
+  });
+  Object.keys(sums).forEach(k=>sums[k]=sums[k]/3);
+  return sums;
+}
+function openBudgetEditor(){
+  if(!requireWrite()) return;
+  const avg=recentMonthlyAverages();
+  const cats=['Total'].concat(Object.keys(EFF_META));
+  document.getElementById('budgetEditBody').innerHTML=`
+    <p class="modal-note">Leave a box empty for no limit. The average under each name is from your last three months.</p>
+    <div>${cats.map(c=>{
+      const m=budgetMeta(c), a=avg[c]||0;
+      return `<div class="budget-edit-row">
+        <span class="bd-swatch" style="background:${m.color}1F;border:1px solid ${m.color}33"><i class="bi ${m.icon}" style="color:${m.color}"></i></span>
+        <div><div class="be-name">${c==='Total'?'Total spending':esc(c)}</div><span class="be-hint">${a>0?'avg '+money0(a)+'/mo':'no recent spending'}</span></div>
+        <div class="money-input"><input type="number" min="0" step="1" inputmode="decimal" data-cat="${esc(c)}" value="${budgets[c]>0?budgets[c]:''}" placeholder="—" aria-label="${esc(c)} monthly budget"></div>
+      </div>`;
+    }).join('')}</div>
+    <button class="save-btn" id="budgetSaveBtn" onclick="saveBudgetEditor()"><i class="bi bi-check2"></i> Save budgets</button>`;
+  document.getElementById('budgetModal').classList.add('open');
+}
+function closeBudgetEditor(){ document.getElementById('budgetModal').classList.remove('open'); }
+async function saveBudgetEditor(){
+  const next={};
+  document.querySelectorAll('#budgetEditBody input[data-cat]').forEach(inp=>{
+    const n=parseFloat(inp.value);
+    if(n>0) next[inp.dataset.cat]=Math.round(n*100)/100;
+  });
+  const btn=document.getElementById('budgetSaveBtn');
+  btn.disabled=true; btn.innerHTML='<i class="bi bi-arrow-repeat spin"></i> Saving…';
+  try{
+    const out=await api('saveBudgets',{budgets:next});
+    budgets=out.budgets||next; persistBudgets();
+    closeBudgetEditor(); renderBudgets();
+    toast('✓ Budgets saved');
+  }catch(err){
+    btn.disabled=false; btn.innerHTML='<i class="bi bi-check2"></i> Save budgets';
+    if(!(err instanceof LockedError)) toast('Not saved — '+errMsg(err),true);
+  }
+}
+
+// ─── INSTALL AS AN APP ───
+let deferredInstall=null;
+window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); deferredInstall=e; updateInstallRow(); });
+window.addEventListener('appinstalled',()=>{ deferredInstall=null; updateInstallRow(); });
+function isStandalone(){ return matchMedia('(display-mode: standalone)').matches || navigator.standalone===true; }
+function updateInstallRow(){
+  const row=document.getElementById('installRow'), txt=document.getElementById('installText'), btn=document.getElementById('installBtn');
+  if(!row) return;
+  if(isStandalone()){ row.hidden=true; return; }
+  const ua=navigator.userAgent;
+  const iOS=/iPhone|iPad|iPod/.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+  const macSafari=/Macintosh/.test(ua)&&/Safari/.test(ua)&&!/Chrome|Chromium|Edg|Firefox/.test(ua)&&!iOS;
+  row.hidden=false; btn.hidden=true;
+  if(deferredInstall){ txt.textContent='Install as an app on this computer'; btn.hidden=false; }
+  else if(iOS) txt.innerHTML='Install on your iPhone: tap <i class="bi bi-box-arrow-up"></i> Share, then <strong>Add to Home Screen</strong>';
+  else if(macSafari) txt.innerHTML='Install on your Mac: <strong>File → Add to Dock</strong>';
+  else txt.innerHTML='Install: click the install icon at the right end of Chrome’s address bar';
+}
+async function installApp(){
+  if(!deferredInstall) return;
+  deferredInstall.prompt();
+  try{ await deferredInstall.userChoice; }catch{}
+  deferredInstall=null; updateInstallRow();
 }
 
 // ─── EXPORT ───
@@ -1835,15 +2496,24 @@ async function submitAllExpenses() {
 
   if (!uids.length) { if (btn) btn.disabled = false; return; }
 
-  for (let i = 0; i < uids.length; i++) {
-    if (label) label.textContent = `Saving ${i + 1} of ${uids.length}…`;
-    await saveExpense(uids[i]);
-    if (i < uids.length - 1) await sleep(600); // brief pause between saves
-  }
+  // Three at a time; the backend's lock keeps rows from colliding
+  const total = uids.length, todo = uids.slice();
+  let done = 0, ok = 0;
+  if (label) label.textContent = `Saving 0 of ${total}…`;
+  const worker = async () => {
+    while (todo.length) {
+      const uid = todo.shift();
+      if (await saveExpense(uid, true)) ok++;
+      done++;
+      if (label) label.textContent = `Saving ${done} of ${total}…`;
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
 
   if (btn) btn.disabled = false;
   updateSubmitAllBtn();
-  toast(`✓ Saved ${uids.length} expense${uids.length === 1 ? '' : 's'} to Google Sheets`);
+  if (ok === total) toast(`✓ Saved ${ok} expense${ok === 1 ? '' : 's'} to Google Sheets`);
+  else toast(`Saved ${ok} of ${total} — tap Try again on the rest`, true);
 }
 
 // ─── MASTER CATEGORY BREAKDOWN ───
@@ -2308,17 +2978,19 @@ function restoreRail(){
 }
 
 // ─── KEYBOARD SHORTCUTS ───
-// 1-4 jump between tabs, / focuses search, Esc closes any open modal.
-const TAB_KEYS = ['upload','dashboard','list','table'];
+// 1-5 jump between tabs, / focuses search, Esc closes any open modal.
+const TAB_KEYS = TABS;
 document.addEventListener('keydown', e => {
   const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || '');
 
   if (e.key === 'Escape') {
     document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
+    editingId = null;
     if (typing) document.activeElement.blur();
     return;
   }
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (isLocked() || document.body.classList.contains('share-mode')) return;
 
   if (e.key === '/') {
     e.preventDefault();
@@ -2333,23 +3005,36 @@ document.addEventListener('keydown', e => {
 });
 
 // ─── INIT ───
+// Offline support and "Add to Home Screen" / Install. Network-first, so a
+// new version shows up on the next open; nothing from Google is cached.
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+
 (async () => {
+  // Dad's link: render the read-only page and nothing else
+  const shareKey = new URLSearchParams(location.search).get('reimb');
+  if (shareKey) {
+    document.body.classList.add('share-mode');
+    renderShareView(shareKey);
+    return;
+  }
+
   // 1. Show cached data immediately
-  try { expenses = JSON.parse(localStorage.getItem('ucf_expenses_v2') || '[]'); } catch { expenses = []; }
+  try { expenses = normalizeAll(JSON.parse(store.get('ucf_expenses_v2', '[]'))); } catch { expenses = []; }
+  try { budgets = JSON.parse(store.get('exp_budgets', '{}')) || {}; } catch { budgets = {}; }
   updateBadge();
   checkSetup();
+  updateInstallRow();
 
   // 2. Fetch from Sheets in background — when done, re-render active tab
   const fromSheets = await loadExpenses();
   updateBadge();
-  localStorage.setItem('last_sync', new Date().toISOString());
+  if (fromSheets) store.set('last_sync', new Date().toISOString());
+  updateSyncStatus();
 
   // 3. Re-render whichever tab is currently open
-  const activeTab = ['upload','dashboard','list','table']
-    .find(t => document.getElementById('tab-'+t)?.classList.contains('active'));
-  if (activeTab === 'dashboard') renderCharts();
-  if (activeTab === 'list')      renderList();
-  if (activeTab === 'table')     renderTable();
+  renderActiveTab();
 
   // 4. Start the motion layer
   restoreRail();

@@ -1,18 +1,32 @@
 /**
- * Dylan's Expenses — Google Apps Script backend
- * ---------------------------------------------
- * Paste this into the Apps Script editor bound to the expenses spreadsheet,
- * then Deploy > Manage deployments > Edit > Version: New version > Deploy.
- * The web app must be deployed as "Execute as: Me" and
- * "Who has access: Anyone" so the browser can reach it without a login.
+ * Dylan's Expenses — Google Apps Script backend (v2)
+ * ---------------------------------------------------
+ * Paste this whole file into the Apps Script editor bound to the expenses
+ * spreadsheet, then Deploy > Manage deployments > Edit (pencil) >
+ * Version: New version > Deploy. Editing the existing deployment keeps the
+ * same /exec URL, so index.html doesn't need to change.
  *
- * Column order is defined once, in HEADERS. index.html writes and reads the
- * same order, so the two must be changed together.
+ * The web app must be deployed as "Execute as: Me" and
+ * "Who has access: Anyone" so the browser can reach it without a Google login.
+ * That is why every request now has to carry the passcode: the URL is public.
+ *
+ * ONE-TIME SETUP — Project Settings (gear) > Script Properties:
+ *   GEMINI_KEY  = your Gemini API key          (already set)
+ *   PASSCODE    = what you'll type in the app  (6+ characters)
+ *   SHARE_KEY   = created automatically the first time you share the
+ *                 reimbursement page. Delete it to kill every old link.
+ *
+ * Column order is defined once, in HEADERS. index.html reads and writes
+ * objects, never column positions, so only this file knows the order.
  */
 
-var SHEET_ID  = '193exXTS041Quq_-VOS_0uXMMAv6RM6eFuKHMgkUkIXo';
-var FOLDER_ID = '1VtL_8OtIyHmute0nbAcr0LgCnoE6QLbV';
-var TAB_NAME  = 'Expenses';
+var API_VERSION = 2;
+
+var SHEET_ID    = '193exXTS041Quq_-VOS_0uXMMAv6RM6eFuKHMgkUkIXo';
+var FOLDER_ID   = '1VtL_8OtIyHmute0nbAcr0LgCnoE6QLbV';
+var TAB_NAME    = 'Expenses';
+var BUDGET_TAB  = 'Budgets';
+var DELETED_TAB = 'Deleted';
 
 var HEADERS = [
   'Timestamp',
@@ -26,18 +40,34 @@ var HEADERS = [
   'Do You Need Reimbursement',
   'Have You Been Reimbursed',
   'Additional Info',
-  'Is This A 529 Expense'
+  'Is This A 529 Expense',
+  'ID'                        // stable row id, so edits and deletes hit the right row
 ];
+var ID_COL = 13;              // 1-based column of 'ID'
 
-// Allowed values, used to build the in-sheet dropdowns
+// Allowed values, used to build the in-sheet dropdowns and to validate edits
 var CATEGORIES    = ['Food & Dining','Tuition & Fees','Books & Supplies','Housing',
                      'Transportation','Technology','Healthcare','Entertainment',
                      'Clothing','Personal Care','School Supplies','Other'];
-var SEMESTER_LIST = ['Spring 2025','Summer 2025','Fall 2025','Spring 2026',
-                     'Summer 2026','Fall 2026','Spring 2027'];
 var RECEIPT_TYPES = ['Receipt','Bank Statement'];
 var YES_NO        = ['Yes','No'];
 var YES_NO_MAYBE  = ['Yes','No','Not Sure'];
+
+/** Spring 2025 through two years from now, so the list never runs out. */
+function semesterList() {
+  var out = [], endYear = new Date().getFullYear() + 2;
+  for (var y = 2025; y <= endYear; y++) out.push('Spring ' + y, 'Summer ' + y, 'Fall ' + y);
+  return out;
+}
+
+function newId() {
+  return 'e' + Utilities.getUuid().replace(/-/g, '').slice(0, 12);
+}
+/** Accept an id from the browser only if it looks like one of ours. */
+function cleanId(v) {
+  v = String(v || '');
+  return /^[A-Za-z0-9_-]{6,40}$/.test(v) ? v : '';
+}
 
 /** Object -> row, in HEADERS order. */
 function toRow(e) {
@@ -53,14 +83,15 @@ function toRow(e) {
     e.needsReimb || 'No',
     e.reimbursed || 'No',
     e.notes || '',
-    e.is529 || 'Not Sure'
+    e.is529 || 'Not Sure',
+    e.id || newId()
   ];
 }
 
 /** Row -> object, in HEADERS order. */
 function toObject(row, index) {
   return {
-    id:          'sheet-' + index,
+    id:          row[12] ? String(row[12]) : 'sheet-' + index,
     timestamp:   row[0] ? String(row[0]) : '',
     place:       row[1] ? String(row[1]) : 'Unknown',
     category:    row[2] ? String(row[2]) : 'Other',
@@ -94,6 +125,9 @@ function formatDate(v) {
 function getSheet() {
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var sh = ss.getSheetByName(TAB_NAME) || ss.getSheets()[0];
+  if (sh.getMaxColumns() < HEADERS.length) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), HEADERS.length - sh.getMaxColumns());
+  }
   if (sh.getLastRow() === 0) {
     sh.appendRow(HEADERS);
     applyFormatting(sh);
@@ -101,24 +135,122 @@ function getSheet() {
   return sh;
 }
 
-/** GET ?action=load — every row as JSON. */
+/** One writer at a time, so two saves can't shift each other's rows. */
+function withLock(fn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+/* ===================================================================
+   PASSCODE
+
+   The /exec URL is in the page source, and the page is public. Without a
+   check here, anyone could download every expense and receipt link, or run
+   scans billed to the Gemini key. Every request except the reimbursement
+   share link must carry the passcode.
+
+   After 20 wrong guesses in 15 minutes, everything is refused until the
+   window passes, which makes guessing a short passcode impractical.
+   =================================================================== */
+
+function checkKey(key) {
+  var pass = PropertiesService.getScriptProperties().getProperty('PASSCODE');
+  if (!pass) return 'PASSCODE is not set. Apps Script > Project Settings > Script Properties > add PASSCODE.';
+  var cache = CacheService.getScriptCache();
+  var fails = Number(cache.get('auth_fails') || 0);
+  if (fails >= 20) return 'Too many wrong passcodes. Try again in 15 minutes.';
+  if (String(key || '') === String(pass)) return '';
+  cache.put('auth_fails', String(fails + 1), 900);
+  return key ? 'Wrong passcode' : 'Passcode required';
+}
+
+function lockedResponse(msg) {
+  return json({ success: false, locked: true, error: msg, apiVersion: API_VERSION });
+}
+
+/* ===================================================================
+   READ
+   =================================================================== */
+
+/** GET ?action=load&key=…  — every row as JSON, plus budgets.
+    GET ?action=reimb&share=… — the read-only reimbursement list. */
 function doGet(e) {
+  var p = (e && e.parameter) || {};
   try {
-    var sh = getSheet();
-    var last = sh.getLastRow();
-    var out = [];
-    if (last > 1) {
-      var values = sh.getRange(2, 1, last - 1, HEADERS.length).getValues();
-      for (var i = 0; i < values.length; i++) {
-        var row = values[i];
-        if (!row[1] && !row[4]) continue;          // skip blank rows
-        out.push(toObject(row, i));
-      }
-    }
-    return json({ success: true, expenses: out, count: out.length });
-  } catch (err) {
-    return json({ success: false, error: String(err) });
+    if (p.action === 'reimb') return json(shareView(p.share));
+    var err = checkKey(p.key);
+    if (err) return lockedResponse(err);
+    return json(loadAll());
+  } catch (err2) {
+    return json({ success: false, error: String(err2), apiVersion: API_VERSION });
   }
+}
+
+function loadAll() {
+  var sh = getSheet();
+  ensureIds(sh);
+  var out = readExpenses(sh);
+  return { success: true, apiVersion: API_VERSION, expenses: out, count: out.length,
+           budgets: readBudgets() };
+}
+
+function readExpenses(sh) {
+  var last = sh.getLastRow();
+  var out = [];
+  if (last > 1) {
+    var values = sh.getRange(2, 1, last - 1, HEADERS.length).getValues();
+    for (var i = 0; i < values.length; i++) {
+      var row = values[i];
+      if (!row[1] && !row[4]) continue;          // skip blank rows
+      out.push(toObject(row, i));
+    }
+  }
+  return out;
+}
+
+/** Give every row an ID the first time it's seen — including rows typed
+    straight into the sheet. Runs under the lock and re-reads inside it, so
+    two devices loading at once can't hand out different IDs for one row. */
+function ensureIds(sh) {
+  if (sh.getLastRow() < 2) return;
+  if (!missingIds(sh)) return;
+  withLock(function () {
+    var last = sh.getLastRow();
+    var head = sh.getRange(1, ID_COL);
+    if (head.getValue() !== 'ID') {
+      head.setValue('ID').setFontWeight('bold').setFontColor('#FFFFFF').setBackground('#3A6644');
+    }
+    var idRange = sh.getRange(2, ID_COL, last - 1, 1);
+    var ids  = idRange.getValues();
+    var data = sh.getRange(2, 1, last - 1, 5).getValues();
+    var changed = false;
+    for (var i = 0; i < ids.length; i++) {
+      if (!ids[i][0] && (data[i][1] || data[i][4])) { ids[i][0] = newId(); changed = true; }
+    }
+    if (changed) idRange.setValues(ids);
+  });
+}
+
+function missingIds(sh) {
+  var last = sh.getLastRow();
+  var ids  = sh.getRange(2, ID_COL, last - 1, 1).getValues();
+  var data = sh.getRange(2, 1, last - 1, 5).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (!ids[i][0] && (data[i][1] || data[i][4])) return true;
+  }
+  return false;
+}
+
+/** Row number (1-based) for an ID, or -1. */
+function findRow(sh, id) {
+  var last = sh.getLastRow();
+  if (last < 2 || !id) return -1;
+  var ids = sh.getRange(2, ID_COL, last - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === String(id)) return i + 2;
+  }
+  return -1;
 }
 
 /* ===================================================================
@@ -128,10 +260,6 @@ function doGet(e) {
    to the browser is public by definition — Google's scanner disabled the
    previous one within hours of the repo going public. Here the browser
    sends an image and gets back parsed JSON; it never sees the key.
-
-   ONE-TIME SETUP:
-     Apps Script > Project Settings (gear) > Script Properties >
-     Add script property:  GEMINI_KEY  =  <your new key>
    =================================================================== */
 
 var GEMINI_PRIMARY  = 'gemini-2.5-flash-lite';
@@ -177,11 +305,16 @@ function testGeminiKey() {
   return out;
 }
 
-function callGemini(model, b64) {
+/** Images arrive as JPEG; a PDF (an emailed receipt) is passed through as-is. */
+function scanMime(mime) {
+  return mime === 'application/pdf' ? 'application/pdf' : 'image/jpeg';
+}
+
+function callGemini(model, b64, mime) {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model +
             ':generateContent?key=' + encodeURIComponent(geminiKey());
   var body = {
-    contents: [{ parts: [ { inline_data: { mime_type: 'image/jpeg', data: b64 } },
+    contents: [{ parts: [ { inline_data: { mime_type: scanMime(mime), data: b64 } },
                           { text: SCAN_PROMPT } ] }],
     generationConfig: { temperature: 0.1, maxOutputTokens: 400 }
   };
@@ -209,12 +342,12 @@ function callGemini(model, b64) {
 }
 
 /** Primary model with retries, then the fallback model. */
-function scanReceipt(b64) {
+function scanReceipt(b64, mime) {
   if (!b64) return { success: false, error: 'No image supplied' };
   var models = [GEMINI_PRIMARY, GEMINI_FALLBACK], lastErr = 'unknown';
   for (var m = 0; m < models.length; m++) {
     for (var attempt = 1; attempt <= 3; attempt++) {
-      var res = callGemini(models[m], b64);
+      var res = callGemini(models[m], b64, mime);
       if (res.ok) return { success: true, data: res.data, model: models[m] };
       lastErr = res.error;
       if (!res.retryable) break;          // auth/bad-request: next model, don't hammer
@@ -224,40 +357,269 @@ function scanReceipt(b64) {
   return { success: false, error: lastErr };
 }
 
-/** POST — one expense, with an optional base64 receipt image. */
+/* ===================================================================
+   WRITE
+   =================================================================== */
+
+/** POST — every action. The body is a form field `payload` holding JSON. */
 function doPost(e) {
+  var payload;
   try {
-    var payload = JSON.parse(e.parameter.payload);
-
-    if (payload.action === 'scan')    return json(scanReceipt(payload.imageBase64));
-    if (payload.action === 'migrate') return json(migrateSheet());
-
-    // Store the image first so the row carries its link
-    if (payload.imageBase64) {
-      try {
-        var folder = DriveApp.getFolderById(FOLDER_ID);
-        var stamp  = Utilities.formatDate(new Date(), 'America/New_York', 'yyyy-MM-dd_HHmmss');
-        var safe   = String(payload.place || 'receipt').replace(/[^\w\s-]/g, '').trim().slice(0, 40);
-        var label  = (payload.receiptType === 'Bank Statement') ? 'statement' : 'receipt';
-        var blob   = Utilities.newBlob(
-          Utilities.base64Decode(payload.imageBase64),
-          'image/jpeg',
-          stamp + '_' + label + '_' + safe + '.jpg'
-        );
-        var file = folder.createFile(blob);
-        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-        payload.receiptUrl = file.getUrl();
-      } catch (imgErr) {
-        // A Drive failure must not lose the expense itself
-        payload.receiptUrl = 'UPLOAD_FAILED: ' + String(imgErr);
-      }
-    }
-
-    getSheet().appendRow(toRow(payload));
-    return json({ success: true, receiptUrl: payload.receiptUrl || '' });
-  } catch (err) {
-    return json({ success: false, error: String(err) });
+    payload = JSON.parse((e && e.parameter && e.parameter.payload) || '{}');
+  } catch (badJson) {
+    return json({ success: false, error: 'Bad request' });
   }
+  try {
+    var err = checkKey(payload.key);
+    if (err) return lockedResponse(err);
+    delete payload.key;
+
+    var action = payload.action || 'add';
+    if (action === 'load')        return json(loadAll());
+    if (action === 'scan')        return json(scanReceipt(payload.imageBase64, payload.mimeType));
+    if (action === 'add')         return json(addExpense(payload));
+    if (action === 'update')      return json(updateExpenses(payload.ids || [payload.id], payload.changes || {}));
+    if (action === 'delete')      return json(deleteExpense(payload.id));
+    if (action === 'saveBudgets') return json(saveBudgets(payload.budgets || {}));
+    if (action === 'shareLink')   return json({ success: true, share: getShareKey(!!payload.reset) });
+    if (action === 'migrate')     return json(migrateSheet());
+    return json({ success: false, error: 'Unknown action: ' + action });
+  } catch (err2) {
+    return json({ success: false, error: String(err2) });
+  }
+}
+
+/** Store the receipt in Drive and return its link. A Drive failure must not
+    lose the expense itself, so it comes back as a marked string instead. */
+function saveReceiptFile(p) {
+  try {
+    var folder = DriveApp.getFolderById(FOLDER_ID);
+    var stamp  = Utilities.formatDate(new Date(), 'America/New_York', 'yyyy-MM-dd_HHmmss');
+    var safe   = String(p.place || 'receipt').replace(/[^\w\s-]/g, '').trim().slice(0, 40);
+    var label  = (p.receiptType === 'Bank Statement') ? 'statement' : 'receipt';
+    var isPdf  = p.imageMime === 'application/pdf';
+    var blob   = Utilities.newBlob(
+      Utilities.base64Decode(p.imageBase64),
+      isPdf ? 'application/pdf' : 'image/jpeg',
+      stamp + '_' + label + '_' + safe + (isPdf ? '.pdf' : '.jpg')
+    );
+    var file = folder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    return file.getUrl();
+  } catch (imgErr) {
+    return 'UPLOAD_FAILED: ' + String(imgErr);
+  }
+}
+
+/**
+ * One expense, with an optional base64 receipt.
+ *
+ * The browser picks the ID. If a save times out and the browser retries,
+ * the second attempt finds the ID already in the sheet and returns that row
+ * instead of adding a duplicate (or uploading the receipt twice).
+ */
+function addExpense(p) {
+  var id = cleanId(p.id) || newId();
+  var sh = getSheet();
+
+  var existing = findRow(sh, id);
+  if (existing > 0) {
+    return { success: true, duplicate: true, id: id,
+             expense: toObject(sh.getRange(existing, 1, 1, HEADERS.length).getValues()[0], existing - 2) };
+  }
+
+  // Drive upload happens outside the lock — it's the slow part
+  var receiptUrl = p.receiptUrl || '';
+  if (p.imageBase64) receiptUrl = saveReceiptFile(p);
+
+  return withLock(function () {
+    var again = findRow(sh, id);
+    if (again > 0) {
+      return { success: true, duplicate: true, id: id,
+               expense: toObject(sh.getRange(again, 1, 1, HEADERS.length).getValues()[0], again - 2) };
+    }
+    p.id = id;
+    p.receiptUrl = receiptUrl;
+    var row = toRow(p);
+    sh.appendRow(row);
+    return { success: true, id: id, receiptUrl: receiptUrl, expense: toObject(row, 0) };
+  });
+}
+
+// Fields the app may change after saving, and their 0-based column
+var EDITABLE = { place: 1, category: 2, date: 3, amount: 4, semester: 5, receiptType: 6,
+                 needsReimb: 8, reimbursed: 9, notes: 10, is529: 11 };
+
+function cleanValue(field, v) {
+  if (field === 'amount') {
+    var n = Math.round((Number(v) || 0) * 100) / 100;
+    if (n < 0) throw new Error('Amount cannot be negative');
+    return n;
+  }
+  if (field === 'date') {
+    v = String(v || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Error('Date must be YYYY-MM-DD');
+    return v;
+  }
+  if (field === 'needsReimb' || field === 'reimbursed') {
+    if (YES_NO.indexOf(v) === -1) throw new Error(field + ' must be Yes or No');
+    return v;
+  }
+  if (field === 'is529') {
+    if (YES_NO_MAYBE.indexOf(v) === -1) throw new Error('is529 must be Yes, No or Not Sure');
+    return v;
+  }
+  if (field === 'receiptType') {
+    if (RECEIPT_TYPES.indexOf(v) === -1) throw new Error('Unknown receipt type');
+    return v;
+  }
+  return String(v == null ? '' : v).trim().slice(0, 500);
+}
+
+/** Apply the same changes to one or more expenses, by ID. */
+function updateExpenses(ids, changes) {
+  ids = (ids || []).map(cleanId).filter(String);
+  if (!ids.length) return { success: false, error: 'No expense id given' };
+
+  // Validate everything before touching the sheet
+  var clean = {};
+  for (var field in changes) {
+    if (!changes.hasOwnProperty(field) || !EDITABLE.hasOwnProperty(field)) continue;
+    clean[field] = cleanValue(field, changes[field]);
+  }
+  if (!Object.keys(clean).length) return { success: false, error: 'Nothing to change' };
+
+  return withLock(function () {
+    var sh = getSheet();
+    var updated = [], missing = [];
+    for (var i = 0; i < ids.length; i++) {
+      var row = findRow(sh, ids[i]);
+      if (row < 0) { missing.push(ids[i]); continue; }
+      for (var f in clean) sh.getRange(row, EDITABLE[f] + 1).setValue(clean[f]);
+      updated.push(toObject(sh.getRange(row, 1, 1, HEADERS.length).getValues()[0], row - 2));
+    }
+    return { success: missing.length === 0, updated: updated, missing: missing,
+             error: missing.length ? missing.length + ' expense(s) not found — refresh and try again' : undefined };
+  });
+}
+
+/** Moves the row to a "Deleted" tab rather than destroying it. */
+function deleteExpense(id) {
+  id = cleanId(id);
+  if (!id) return { success: false, error: 'No expense id given' };
+  return withLock(function () {
+    var sh = getSheet();
+    var row = findRow(sh, id);
+    if (row < 0) return { success: true, missing: true };
+    var values = sh.getRange(row, 1, 1, HEADERS.length).getValues()[0];
+
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var bin = ss.getSheetByName(DELETED_TAB);
+    if (!bin) {
+      bin = ss.insertSheet(DELETED_TAB);
+      bin.appendRow(HEADERS.concat(['Deleted At']));
+      bin.getRange(1, 1, 1, HEADERS.length + 1)
+         .setFontWeight('bold').setFontColor('#FFFFFF').setBackground('#8A2E26');
+      bin.setFrozenRows(1);
+    }
+    bin.appendRow(values.concat([new Date()]));
+    sh.deleteRow(row);
+    return { success: true };
+  });
+}
+
+/* ===================================================================
+   BUDGETS — a "Budgets" tab: Category | Monthly Budget
+   Categories are the app's dashboard categories (Groceries and Eating Out
+   are separate there), plus "Total" for an overall monthly limit.
+   =================================================================== */
+
+function budgetSheet(create) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var sh = ss.getSheetByName(BUDGET_TAB);
+  if (!sh && create) {
+    sh = ss.insertSheet(BUDGET_TAB);
+    sh.appendRow(['Category', 'Monthly Budget']);
+    sh.getRange(1, 1, 1, 2).setFontWeight('bold').setFontColor('#FFFFFF').setBackground('#3A6644');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(1, 200);
+    sh.setColumnWidth(2, 140);
+  }
+  return sh;
+}
+
+function readBudgets() {
+  var sh = budgetSheet(false);
+  if (!sh || sh.getLastRow() < 2) return {};
+  var values = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+  var out = {};
+  for (var i = 0; i < values.length; i++) {
+    var cat = String(values[i][0] || '').trim();
+    var amt = Number(values[i][1]) || 0;
+    if (cat && amt > 0) out[cat] = Math.round(amt * 100) / 100;
+  }
+  return out;
+}
+
+function saveBudgets(budgets) {
+  var rows = [];
+  for (var cat in budgets) {
+    if (!budgets.hasOwnProperty(cat)) continue;
+    var amt = Math.round((Number(budgets[cat]) || 0) * 100) / 100;
+    if (amt > 0) rows.push([String(cat).trim().slice(0, 60), amt]);
+  }
+  return withLock(function () {
+    var sh = budgetSheet(true);
+    if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, 2).clearContent();
+    if (rows.length) {
+      sh.getRange(2, 1, rows.length, 2).setValues(rows);
+      sh.getRange(2, 2, rows.length, 1).setNumberFormat('$#,##0.00');
+    }
+    return { success: true, budgets: readBudgets() };
+  });
+}
+
+/* ===================================================================
+   REIMBURSEMENT SHARE LINK
+
+   A separate long random key that unlocks ONE read-only view: expenses
+   marked "needs reimbursement" that aren't reimbursed yet. It can't load
+   anything else or change anything. Resetting it (or deleting SHARE_KEY
+   in Script Properties) kills every link handed out before.
+   =================================================================== */
+
+function getShareKey(reset) {
+  var props = PropertiesService.getScriptProperties();
+  var k = props.getProperty('SHARE_KEY');
+  if (!k || reset) {
+    k = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+    props.setProperty('SHARE_KEY', k);
+  }
+  return k;
+}
+
+function shareView(share) {
+  var k = PropertiesService.getScriptProperties().getProperty('SHARE_KEY');
+  if (!k || !share || String(share) !== k) {
+    return { success: false, error: 'This link has expired. Ask Dylan for a new one.' };
+  }
+  var items = [];
+  var all = readExpenses(getSheet());
+  for (var i = 0; i < all.length; i++) {
+    var e = all[i];
+    if (e.needsReimb !== 'Yes' || e.reimbursed === 'Yes') continue;
+    items.push({
+      date: e.date, place: e.place, amount: e.amount, category: e.category, notes: e.notes,
+      receiptUrl: /^https:\/\//.test(e.receiptUrl) ? e.receiptUrl : ''
+    });
+  }
+  return { success: true, items: items, generated: new Date().toISOString() };
+}
+
+/** Pad a row out to the full HEADERS width (the recovery tools build 12). */
+function padRow(r) {
+  while (r.length < HEADERS.length) r.push('');
+  return r;
 }
 
 /**
@@ -328,7 +690,7 @@ function migrateSheet() {
     var needsRaw = String(cell(row, map.needs) || '').toLowerCase();
     var needs = needsRaw ? (needsRaw.indexOf('yes') !== -1 ? 'Yes' : 'No') : 'No';
 
-    rebuilt.push([
+    rebuilt.push(padRow([
       cell(row, map.timestamp) || cell(row, map.date) || '',
       place || 'Unknown',
       String(cell(row, map.category) || 'Other'),
@@ -341,7 +703,7 @@ function migrateSheet() {
       reimbursed,
       String(cell(row, map.info) || ''),
       String(cell(row, map.is529) || 'Not Sure')
-    ]);
+    ]));
     count++;
   }
 
@@ -380,7 +742,7 @@ function applyFormatting(sh) {
   sh.setRowHeight(1, 42);
 
   // Column widths, in HEADERS order
-  var widths = [150, 190, 150, 100, 95, 115, 130, 210, 150, 150, 240, 130];
+  var widths = [150, 190, 150, 100, 95, 115, 130, 210, 150, 150, 240, 130, 120];
   for (var i = 0; i < widths.length; i++) sh.setColumnWidth(i + 1, widths[i]);
 
   // Number and date formats
@@ -400,7 +762,7 @@ function applyFormatting(sh) {
     );
   }
   dropdown(3,  CATEGORIES);
-  dropdown(6,  SEMESTER_LIST);
+  dropdown(6,  semesterList());
   dropdown(7,  RECEIPT_TYPES);
   dropdown(9,  YES_NO);
   dropdown(10, YES_NO);
@@ -550,7 +912,7 @@ function restoreToNewTab() {
     var is529 = String(row[IS529] || '').trim();
     if (is529 !== 'Yes' && is529 !== 'No') is529 = 'Not Sure';
 
-    rebuilt.push([
+    rebuilt.push(padRow([
       row[SUBMITTED] ? String(row[SUBMITTED]) : date,
       place || 'Unknown',
       String(row[CAT] || 'Other'),
@@ -563,7 +925,7 @@ function restoreToNewTab() {
       reimbursed,
       String(row[NOTES] || ''),
       is529
-    ]);
+    ]));
   }
 
   if (rebuilt.length < 2) throw new Error('Built 0 rows — aborting without changes.');
@@ -703,7 +1065,7 @@ function restoreFromBackup(backupFileId) {
     var needsRaw = String(cell(row, map.needs) || '').toLowerCase();
     var needs = needsRaw ? (needsRaw.indexOf('yes') !== -1 ? 'Yes' : 'No') : 'No';
 
-    rebuilt.push([
+    rebuilt.push(padRow([
       cell(row, map.timestamp) || date || '',
       place || 'Unknown',
       String(cell(row, map.category) || 'Other'),
@@ -716,7 +1078,7 @@ function restoreFromBackup(backupFileId) {
       reimbursed,
       String(cell(row, map.info) || ''),
       String(cell(row, map.is529) || 'Not Sure')
-    ]);
+    ]));
   }
 
   // 2. Refuse to wipe the live sheet unless we actually have rows to put back
