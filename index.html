@@ -124,8 +124,10 @@ body.scrolled .topbar{box-shadow:var(--sh-4);background:rgba(254,252,248,0.95);b
 .tab.active i{transform:translateY(-1px) scale(1.06);}
 
 .page{display:none;padding:18px 16px;}
-.page.active{display:block;animation:pageIn var(--dur-3) var(--ease) both;}
-@keyframes pageIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+/* A quick fade, not a half-second slide: switching tabs should feel instant */
+.page.active{display:block;animation:pageIn 0.12s ease-out both;}
+@keyframes pageIn{from{opacity:0.35;}to{opacity:1;}}
+.list-sentinel{grid-column:1/-1;height:1px;}
 
 /* DROP ZONE */
 #fileInput{display:none;}
@@ -1326,14 +1328,32 @@ async function unlock(ev){
 // Forget the passcode and every cached expense on this device
 function lockDevice(){
   ['exp_key','ucf_expenses_v2','exp_budgets','exp_share','exp_bank','last_sync'].forEach(store.del);
-  expenses=[]; budgets={}; bankState=null;
+  expenses=[]; budgets={}; setBankState(null); dataVer++;
   updateBadge(); renderActiveTab();
   showLock('');
 }
 
 // ─── DATA LAYER — Google Sheets as source of truth, localStorage as cache ───
-function persistExpenses(){ store.set('ucf_expenses_v2',JSON.stringify(expenses)); }
-function persistBudgets(){ store.set('exp_budgets',JSON.stringify(budgets)); }
+// dataVer goes up only when something actually changed. Each tab remembers
+// the version it last drew, so switching back to it costs nothing.
+let dataVer=0, _expJson='', _budJson='', _bankJson='';
+function persistExpenses(){
+  const s=JSON.stringify(expenses);
+  if(s===_expJson) return;
+  _expJson=s; dataVer++; store.set('ucf_expenses_v2',s);
+}
+function persistBudgets(){
+  const s=JSON.stringify(budgets);
+  if(s===_budJson) return;
+  _budJson=s; dataVer++; store.set('exp_budgets',s);
+}
+function setBankState(b){
+  bankState=b;
+  const s=JSON.stringify(b);
+  if(s===_bankJson) return;
+  _bankJson=s; dataVer++;
+  if(b&&b.success) store.set('exp_bank',s);
+}
 function newExpId(){ return 'e'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 
 // Bring older rows onto the current shape. The sheet previously stored a
@@ -1386,7 +1406,7 @@ async function _loadExpensesNow(fresh) {
     expenses = normalizeAll(list);
     persistExpenses();
     if (data.budgets && typeof data.budgets === 'object') { budgets = data.budgets; persistBudgets(); }
-    if (data.bank && data.bank.success) { bankState = data.bank; store.set('exp_bank', JSON.stringify(bankState)); }
+    if (data.bank && data.bank.success) setBankState(data.bank);
     lastLoadAt = Date.now();
     return true;
   } catch(e) {
@@ -1399,13 +1419,9 @@ async function _loadExpensesNow(fresh) {
   return false;
 }
 
-// A cheap fingerprint of everything on screen, so a background refresh only
-// redraws (and replays chart animations) when something actually changed.
-function dataSig(){
-  const s=JSON.stringify(expenses)+JSON.stringify(budgets)+JSON.stringify(bankState);
-  let h=5381; for(let i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0;
-  return h+':'+s.length;
-}
+// Changes only when the data does, so a background refresh redraws (and
+// replays chart animations) only when something actually changed.
+function dataSig(){ return dataVer; }
 // Show what's in memory right away; fetch in the background if it's older
 // than a minute; redraw only on a real change.
 async function refreshIfStale(maxAge=60000){
@@ -1443,7 +1459,7 @@ async function loadAndRenderDashboard(fresh=false) {
   }
   if (fromSheets) store.set('last_sync', new Date().toISOString());
   updateSyncStatus();
-  renderCharts();
+  renderTab('dashboard', true);
   return fromSheets;
 }
 
@@ -1451,27 +1467,32 @@ async function loadAndRenderDashboard(fresh=false) {
 const TABS=['upload','dashboard','list','table','reimb'];
 function currentTab(){ return TABS.find(t=>document.getElementById('tab-'+t)?.classList.contains('active')); }
 function showTab(id){
+  if(currentTab()!==id) window.scrollTo(0,0);       // each tab starts at its top
   TABS.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===id);
     document.getElementById('tab-btn-'+t).classList.toggle('active',t===id);
   });
   if(id!=='reimb') document.getElementById('reimbBar').hidden=true;
-  // Every tab draws from memory instantly; data refreshes in the background
-  if(id==='dashboard') { if(expenses.length) renderCharts(); else loadAndRenderDashboard(); }
-  if(id==='list')      ensureDataThen(renderList);
-  if(id==='table')     ensureDataThen(renderTable);
-  if(id==='reimb')     ensureDataThen(renderReimb);
-  if(expenses.length) refreshIfStale();
+  // Every tab draws from memory, and only if the data changed since it was
+  // last drawn; otherwise it's already on the page and just becomes visible.
+  if(id==='dashboard') { if(expenses.length) renderTab('dashboard'); else loadAndRenderDashboard(); }
+  if(id==='list')      ensureDataThen(()=>renderTab('list'));
+  if(id==='table')     ensureDataThen(()=>renderTab('table'));
+  if(id==='reimb')     ensureDataThen(()=>renderTab('reimb'));
+  if(expenses.length) setTimeout(refreshIfStale, 300);   // after the tab has painted
   updateBadge();
 }
-// Redraw whatever is on screen after data changes
-function renderActiveTab(){
-  const t=currentTab();
-  if(t==='dashboard') renderCharts();
-  if(t==='list')      renderList();
-  if(t==='table')     renderTable();
-  if(t==='reimb')     renderReimb();
+const renderedAt={};
+const RENDERERS={ dashboard:()=>renderCharts(), list:()=>renderList(), table:()=>renderTable(), reimb:()=>renderReimb() };
+function renderTab(t, force=false){
+  const fn=RENDERERS[t];
+  if(!fn) return;
+  if(!force && renderedAt[t]===dataVer) return;
+  renderedAt[t]=dataVer;
+  fn();
 }
+// Redraw whatever is on screen after data changes
+function renderActiveTab(){ renderTab(currentTab(), true); }
 
 // Load from Sheets if we have no data, then call fn
 async function ensureDataThen(fn) {
@@ -1935,8 +1956,40 @@ function renderList(){
   if(activeFilter==='bank')data=data.filter(e=>!!e.bankTxnId);
   const list=document.getElementById('expList');
   if(!data.length){list.innerHTML=`<div class="empty-state"><i class="bi bi-receipt-x"></i><p>No expenses${activeFilter!=='all'?' matching this filter':' yet'}.</p></div>`;return;}
+  listData=data; listShown=0;
+  list.innerHTML='';
+  appendListChunk();
+}
+
+// ─── LONG LISTS IN CHUNKS ───
+// 500+ cards or rows at once made the Cards and Table tabs slow to open.
+// The first chunk draws immediately; more are added as you scroll near the
+// end (an invisible marker at the bottom triggers the next chunk).
+const LIST_CHUNK=40, TABLE_CHUNK=80;
+let listData=[], listShown=0, tableData=[], tableShown=0;
+const chunkObs='IntersectionObserver' in window
+  ? new IntersectionObserver(entries=>entries.forEach(en=>{
+      if(!en.isIntersecting) return;
+      chunkObs.unobserve(en.target);
+      const more=en.target._more; en.target.remove(); more();
+    }),{rootMargin:'800px 0px'})
+  : null;
+function addMoreMarker(container, html, more){
+  if(!chunkObs){ more(); return; }
+  container.insertAdjacentHTML('beforeend', html);
+  const m=container.lastElementChild;
+  m._more=more;
+  chunkObs.observe(m);
+}
+function appendListChunk(){
+  const list=document.getElementById('expList');
+  const next=listData.slice(listShown, listShown+LIST_CHUNK);
   const catKeys=Object.keys(CAT_ICONS);
-  list.innerHTML=data.map(e=>{
+  list.insertAdjacentHTML('beforeend', next.map(e=>cardHtml(e,catKeys)).join(''));
+  listShown+=next.length;
+  if(listShown<listData.length) addMoreMarker(list,'<div class="list-sentinel" aria-hidden="true"></div>',appendListChunk);
+}
+function cardHtml(e,catKeys){
     const icon=CAT_ICONS[e.category]||'bi-three-dots';
     const color=CAT_COLORS[catKeys.indexOf(e.category)%CAT_COLORS.length];
     const dateStr=e.date?new Date(e.date+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'';
@@ -1965,7 +2018,6 @@ function renderList(){
       </div>
       ${viewBtn}
     </div>`;
-  }).join('');
 }
 
 // ─── TABLE ───
@@ -1977,7 +2029,21 @@ function renderTable(){
   data.sort((a,b)=>{let av=a[sortCol]||'',bv=b[sortCol]||'';if(sortCol==='amount'){av=parseFloat(av)||0;bv=parseFloat(bv)||0;}return av<bv?-1*sortDir:av>bv?sortDir:0;});
   const body=document.getElementById('tableBody');
   if(!data.length){body.innerHTML=`<tr><td colspan="10" style="text-align:center;padding:30px;color:var(--text3)">No expenses found</td></tr>`;document.getElementById('tableFoot').innerHTML='';return;}
-  body.innerHTML=data.map(e=>{
+  tableData=data; tableShown=0;
+  body.innerHTML='';
+  appendTableChunk();
+  const total=data.reduce((s,e)=>s+(e.amount||0),0);
+  const t529=data.filter(e=>e.is529==='Yes').reduce((s,e)=>s+(e.amount||0),0);
+  document.getElementById('tableFoot').innerHTML=`<tr><td colspan="3" style="color:var(--text2);font-size:12px">${data.length} expense${data.length===1?'':'s'}</td><td class="tfoot-total">${money(total)}</td><td colspan="2" style="color:var(--text3);font-size:12px">529: ${money(t529)}</td><td colspan="4"></td></tr>`;
+}
+function appendTableChunk(){
+  const body=document.getElementById('tableBody');
+  const next=tableData.slice(tableShown, tableShown+TABLE_CHUNK);
+  body.insertAdjacentHTML('beforeend', next.map(rowHtml).join(''));
+  tableShown+=next.length;
+  if(tableShown<tableData.length) addMoreMarker(body,'<tr class="tbl-sentinel" aria-hidden="true"><td colspan="10" style="padding:0;height:1px;border:none"></td></tr>',appendTableChunk);
+}
+function rowHtml(e){
     const dateStr=e.date?new Date(e.date+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}):'—';
     const cls529=e.is529==='Yes'?'td-529-yes':e.is529==='No'?'td-529-no':'';
     const driveCell=e.receiptUrl?`<a class="drive-link" href="${e.receiptUrl}" target="_blank"><i class="bi bi-image"></i> View</a>`:`<span style="color:var(--text3);font-size:12px">—</span>`;
@@ -1996,10 +2062,6 @@ function renderTable(){
       <td style="color:var(--text3);font-style:italic;max-width:130px;overflow:hidden;text-overflow:ellipsis">${esc(e.notes||'—')}</td>
       <td><button class="icon-btn" onclick="openEdit('${e.id}')" title="Edit" aria-label="Edit"><i class="bi bi-pencil"></i></button></td>
     </tr>`;
-  }).join('');
-  const total=data.reduce((s,e)=>s+(e.amount||0),0);
-  const t529=data.filter(e=>e.is529==='Yes').reduce((s,e)=>s+(e.amount||0),0);
-  document.getElementById('tableFoot').innerHTML=`<tr><td colspan="3" style="color:var(--text2);font-size:12px">${data.length} expense${data.length===1?'':'s'}</td><td class="tfoot-total">${money(total)}</td><td colspan="2" style="color:var(--text3);font-size:12px">529: ${money(t529)}</td><td colspan="4"></td></tr>`;
 }
 
 // ─── MODAL ───
@@ -2412,8 +2474,8 @@ function timeAgo(iso){
 async function refreshBanks(){
   if(!canWrite()||bankLoading) return;
   bankLoading=true;
-  try{ bankState=await api('bankStatus'); }
-  catch(e){ bankState={error:errMsg(e)}; }      // never null here, or renderBanks would re-ask forever
+  try{ setBankState(await api('bankStatus')); }
+  catch(e){ setBankState({error:errMsg(e)}); }      // never null here, or renderBanks would re-ask forever
   finally{ bankLoading=false; }
   renderBanks();
 }
@@ -2484,7 +2546,7 @@ async function connectBank(itemId){
         progressStart();
         try{
           const out=await api('bankExchange',{publicToken,institution:(meta&&meta.institution&&meta.institution.name)||''},{timeout:300000});
-          bankState=null;
+          setBankState(null);
           await loadExpenses();
           renderActiveTab();
           const r=out.sync||{};
@@ -2506,7 +2568,7 @@ async function syncBanksNow(){
   try{
     const r=await api('bankSync',{},{timeout:300000});
     await loadExpenses();
-    bankState=null;
+    setBankState(null);
     renderActiveTab();
     if(r.errors&&r.errors.length) toast(r.errors[0],true); else toast('✓ '+bankSummary(r));
   }catch(e){ if(!(e instanceof LockedError)) toast('Sync failed — '+errMsg(e),true); }
@@ -2522,7 +2584,7 @@ async function removeBank(itemId){
     return;
   }
   removeArm=null;
-  try{ bankState=await api('bankRemove',{itemId}); renderBanks(); toast('Removed. Its past purchases stay in your Sheet.'); }
+  try{ setBankState(await api('bankRemove',{itemId})); renderBanks(); toast('Removed. Its past purchases stay in your Sheet.'); }
   catch(e){ if(!(e instanceof LockedError)) toast(errMsg(e),true); }
 }
 
@@ -3098,7 +3160,7 @@ if (window.Chart) {
   Chart.defaults.font.family = "-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif";
   Chart.defaults.font.size = 11;
   Chart.defaults.color = '#A09078';
-  Chart.defaults.animation.duration = PREFERS_REDUCED ? 0 : 900;
+  Chart.defaults.animation.duration = PREFERS_REDUCED ? 0 : 450;
   Chart.defaults.animation.easing = 'easeOutQuart';
   Object.assign(Chart.defaults.plugins.tooltip, {
     backgroundColor: 'rgba(26,22,16,0.94)',
@@ -3137,7 +3199,9 @@ const revealObs = 'IntersectionObserver' in window
     }, { rootMargin: '0px 0px -6% 0px', threshold: 0.04 })
   : null;
 
-const REVEAL_SEL = '.metric, .chart-card, .sync-info, .exp-card, .table-wrap, .export-row';
+// Only the handful of dashboard cards fade in; hundreds of expense cards
+// each fading in one by one was a big part of why tabs felt slow.
+const REVEAL_SEL = '.metric, .chart-card, .sync-info';
 function revealScan() {
   if (!revealObs) return;
   document.querySelectorAll(REVEAL_SEL).forEach((el, i) => {
@@ -3311,6 +3375,8 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
   try { expenses = normalizeAll(JSON.parse(store.get('ucf_expenses_v2', '[]'))); } catch { expenses = []; }
   try { budgets = JSON.parse(store.get('exp_budgets', '{}')) || {}; } catch { budgets = {}; }
   try { bankState = JSON.parse(store.get('exp_bank', 'null')); } catch { bankState = null; }
+  // Baseline for change detection: identical data from Google won't redraw
+  _expJson = JSON.stringify(expenses); _budJson = JSON.stringify(budgets); _bankJson = JSON.stringify(bankState);
   updateBadge();
   checkSetup();
   updateInstallRow();
